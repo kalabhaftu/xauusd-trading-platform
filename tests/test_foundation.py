@@ -1,0 +1,70 @@
+import json
+import logging
+from datetime import timedelta
+
+import pytest
+from pydantic import ValidationError
+
+from app.config.settings import Settings
+from app.domain import utcnow
+from app.monitoring.health import service_health
+from app.monitoring.logger import RedactingFormatter
+from app.risk.circuit_breaker import CircuitBreaker
+
+
+def test_settings_disarmed_and_live_rejected():
+    settings = Settings(_env_file=None)
+    assert settings.mode == "DEMO" and not settings.entries_armed
+    assert settings.max_spread == .5 and settings.max_slippage_points == 20 and settings.slippage_price == .2
+    with pytest.raises(ValueError, match="commission"):
+        settings.require_costs()
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, mode="LIVE").require_demo()
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, entries_armed=True)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, risk_per_trade=.006)
+
+
+def test_secrets_redacted():
+    formatter = RedactingFormatter(["supersecret"])
+    record = logging.LogRecord("test", logging.ERROR, "", 0, "password=supersecret token=abc", (), None)
+    text = formatter.format(record)
+    assert "supersecret" not in text and "abc" not in text
+    assert json.loads(text)["level"] == "ERROR"
+
+
+def test_migration_restart_and_persistent_halt(store):
+    store.migrate()
+    CircuitBreaker(store, "demo:123").trip("test halt")
+    store.engine.dispose()
+    assert CircuitBreaker(store, "demo:123").current()["active"]
+    with pytest.raises(ValueError):
+        CircuitBreaker(store, "demo:123").reset(False)
+    CircuitBreaker(store, "demo:123").reset(True)
+    assert not CircuitBreaker(store, "demo:123").current()["active"]
+
+
+def test_commands_reject_arbitrary_execution(store):
+    with pytest.raises(ValueError):
+        store.enqueue("run-python", {"code": "malicious"})
+    identifier = store.enqueue("halt")
+    assert store.pending_commands()[0]["id"] == identifier
+    store.finish_command(identifier, True, {})
+    assert not store.pending_commands()
+
+
+def test_stale_heartbeat(store):
+    store.set("service", {"state": "RUNNING", "heartbeat": (utcnow() - timedelta(seconds=40)).isoformat()})
+    assert service_health(store)["state"] == "STALE"
+
+
+def test_persisted_audit_context_tracks_source_and_environment(store):
+    store.record("signals", {"config_hash": "fixture-rules", "rationale": "synthetic fixture"},
+                 "SYNTHETIC_TEST:123", "fixture-correlation")
+    context = store.list("signals")[0]["payload"]["_meta"]
+    assert context["environment"] == "DEMO" and context["source"] == "SYNTHETIC_TEST"
+    assert context["configuration_hash"] == "fixture-rules"
+    assert context["correlation_id"] == "fixture-correlation"
+    store.record("backtest_results", {"status": "synthetic fixture"})
+    assert store.list("backtest_results")[0]["payload"]["_meta"]["environment"] == "BACKTEST"
