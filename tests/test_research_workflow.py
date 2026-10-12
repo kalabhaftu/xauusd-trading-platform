@@ -7,16 +7,17 @@ from app.domain import digest
 from app.strategies.registry import build
 
 
-@pytest.mark.parametrize("name", ["trend_pullback", "session_breakout", "mean_reversion"])
+@pytest.mark.parametrize("name", ["ict_sweep_mss_fvg", "support_resistance_bounce"])
 def test_parameter_grid_signal_reuse_matches_direct_strategy_signals(name, synthetic_frames):
-    base = {"entry_timeframe": "M15", "trend_timeframe": "H1"}
-    template_strategy = build(name, {**base, "stop_atr": 1.2})
-    templates = template_strategy.signals(synthetic_frames, "XAUUSD")
+    base = {"entry_timeframe": "M15"}
+    template_strategy = build(name, base)
+    frames = {"M15": synthetic_frames["M15"]}
+    templates = template_strategy.signals(frames, "XAUUSD")
 
     for variation in parameter_grid():
         candidate = build(name, {**base, **variation})
         reused = apply_stop_target_parameters(templates, candidate)
-        direct = candidate.signals(synthetic_frames, "XAUUSD")
+        direct = candidate.signals(frames, "XAUUSD")
         assert [signal.model_dump(mode="json") for signal in reused] == [
             signal.model_dump(mode="json") for signal in direct]
 
@@ -36,17 +37,17 @@ def test_holdout_cannot_be_reopened(store, synthetic_frames, broker, tmp_path):
     costs = CostProfile(commission_per_lot=0, spread_price=.2, slippage_price=.1,
                         swap_long_per_lot_day=0, swap_short_per_lot_day=0)
     with pytest.raises(ValueError, match="already consumed"):
-        research(store, synthetic_frames, ["trend_pullback"], broker.spec("XAUUSD"), costs,
+        research(store, synthetic_frames, ["ict_sweep_mss_fvg"], broker.spec("XAUUSD"), costs,
                  tmp_path, consume_holdout=True)
 
 
 def test_complete_short_sample_comparison_reports_no_approval(store, synthetic_frames, broker, tmp_path):
-    frames = {"M15": synthetic_frames["M15"].iloc[:1000], "H1": synthetic_frames["H1"].iloc[:250]}
+    frames = {"M15": synthetic_frames["M15"].iloc[:1000]}
     cost = CostProfile(commission_per_lot=5, spread_price=.2, slippage_price=.1,
                         swap_long_per_lot_day=-1, swap_short_per_lot_day=-1)
-    result = research(store, frames, ["trend_pullback", "session_breakout", "mean_reversion"],
+    result = research(store, frames, ["ict_sweep_mss_fvg", "support_resistance_bounce"],
                       broker.spec("XAUUSD"), cost, tmp_path)
-    assert len(result["candidates"]) == 3
+    assert len(result["candidates"]) == 2
     assert result["status"] == "NO STRATEGY APPROVED FOR AUTOMATION"
     assert not result["approved"]
     assert store.list("backtest_results")

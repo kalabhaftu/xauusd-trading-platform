@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     account_password: SecretStr | None = None
     symbol: str | None = None
     session_file: Path | None = None
-    active_strategy: str = "trend_pullback"
+    active_strategy: str = "ict_sweep_mss_fvg"
     entries_armed: bool = False
     risk_per_trade: float = Field(default=0.0025, gt=0, le=0.005)
     hard_risk_max: float = Field(default=0.005, gt=0, le=0.005)

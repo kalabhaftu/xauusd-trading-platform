@@ -1,4 +1,3 @@
-import itertools
 import logging
 import statistics
 from datetime import timedelta
@@ -42,29 +41,14 @@ def walk_forward_windows(start, end, policy=None):
 
 
 def parameter_grid():
-    return [{"stop_atr": stop, "reward_risk": reward} for stop, reward in itertools.product(
-        (1.2, 1.5, 1.8), (1.5, 2.0, 2.5))]
+    # Stops and targets now come from each rule's price structure. Do not perform
+    # the old generic ATR/2R sweep against signals that were not designed for it.
+    return [{}]
 
 
 def apply_stop_target_parameters(templates: list[Signal], strategy) -> list[Signal]:
-    """Reuse causal signal decisions while recalculating candidate bracket levels."""
-    parameters = strategy.parameters
-    adjusted = []
-    for signal in templates:
-        atr_value = signal.indicators.get("atr")
-        if atr_value is None or not pd.notna(atr_value) or atr_value <= 0:
-            continue
-        sign = 1 if signal.direction == Direction.LONG else -1
-        distance = float(atr_value) * parameters.stop_atr
-        stop = signal.entry - sign * distance
-        # Mean reversion targets the middle Bollinger band; other rules use an R-multiple target.
-        target = signal.take_profit if strategy.name == "mean_reversion" \
-            else signal.entry + sign * distance * parameters.reward_risk
-        if sign * (target - signal.entry) < distance:
-            continue
-        adjusted.append(signal.model_copy(update={"config_hash": strategy.config_hash,
-                                                  "stop_loss": stop, "take_profit": target}))
-    return adjusted
+    """Preserve the signal's structure-derived bracket for a research candidate."""
+    return [signal.model_copy(update={"config_hash": strategy.config_hash}) for signal in templates]
 
 
 def optimize(frames, name, spec, cost, capital, start, end, base=None, policy=None, risk_fraction=.0025,
@@ -73,10 +57,7 @@ def optimize(frames, name, spec, cost, capital, start, end, base=None, policy=No
     results = []
     grid = parameter_grid() if tune_stop_targets else [{}]
     if signal_templates is None:
-        template_parameters = dict(base or {})
-        if tune_stop_targets:
-            template_parameters["stop_atr"] = min(p["stop_atr"] for p in grid)
-        template_strategy = build(name, template_parameters)
+        template_strategy = build(name, dict(base or {}))
         signal_templates = template_strategy.signals(
             {tf: f.loc[f.index < end] for tf, f in frames.items()}, spec.symbol)
     for variation in grid:
@@ -131,30 +112,31 @@ def research(store, frames, names, spec, cost, report_dir, capital=10000, consum
     policy = policy or ResearchPolicy()
     risk_limits = risk_limits or BacktestRiskLimits()
     entry_timeframe = next(tf for tf in ("M1", "M5", "M15", "M30") if tf in frames)
-    trend_timeframe = next(tf for tf in ("H1", "H4") if tf in frames)
-    base = {**(base_parameters or {}), "entry_timeframe": entry_timeframe, "trend_timeframe": trend_timeframe}
+    base = {**(base_parameters or {}), "entry_timeframe": entry_timeframe}
+    candidate_bases = {
+        name: {**store.get(f"strategy_parameters:{name}", {}), **base}
+        for name in names
+    }
     start, validation_start, holdout_start, end = partitions(
         frames[entry_timeframe], entry_timeframe, evaluation_start)
     dataset_hash = digest({tf: f.to_json(date_format="iso") for tf, f in frames.items()})
     campaign_key = digest({"dataset": dataset_hash, "source": cost.source, "cost": cost,
                            "spec": spec.model_dump(exclude={"timestamp"}), "start": str(start), "end": str(end),
                            "policy": policy.model_dump(), "risk_fraction": risk_fraction,
-                           "risk_limits": risk_limits.model_dump(), "parameters": base,
+                           "risk_limits": risk_limits.model_dump(), "parameters": candidate_bases,
                            "tune_stop_targets": tune_stop_targets})
     consumed_key = f"holdout_consumed:{dataset_hash}"
     if consume_holdout and store.get(consumed_key):
         raise ValueError("Dataset holdout already consumed; do not retune against previously inspected holdout")
     candidates = []
     for name in names:
-        template_parameters = dict(base)
-        if tune_stop_targets:
-            template_parameters["stop_atr"] = min(p["stop_atr"] for p in parameter_grid())
+        template_parameters = dict(candidate_bases[name])
         template_strategy = build(name, template_parameters)
         development_frames = {tf: f.loc[f.index < holdout_start] for tf, f in frames.items()}
         signal_templates = template_strategy.signals(development_frames, spec.symbol)
         logger.info("Research %s: generated %d development signal templates", name, len(signal_templates))
         winner, sensitivity = optimize(frames, name, spec, cost, capital, start, validation_start,
-                                       base=base, policy=policy, risk_fraction=risk_fraction,
+                                       base=template_parameters, policy=policy, risk_fraction=risk_fraction,
                                        risk_limits=risk_limits, tune_stop_targets=tune_stop_targets,
                                        signal_templates=signal_templates)
         if winner is None:
@@ -165,8 +147,7 @@ def research(store, frames, names, spec, cost, report_dir, capital=10000, consum
         candidate_config = {"strategy": name, "strategy_parameters": selected.parameters.model_dump(),
                             "strategy_config_hash": selected.config_hash, "risk_fraction": risk_fraction,
                             "risk_limits": risk_limits.model_dump(), "cost": cost.model_dump(),
-                            "capital": capital, "entry_timeframe": entry_timeframe,
-                            "trend_timeframe": trend_timeframe, "symbol": spec.symbol,
+                            "capital": capital, "entry_timeframe": entry_timeframe, "symbol": spec.symbol,
                             "source": cost.source, "symbol_specification": spec.model_dump(mode="json"),
                             "evaluation_start": str(validation_start), "evaluation_end_exclusive": str(holdout_start),
                             "tune_stop_targets": tune_stop_targets}
@@ -178,7 +159,7 @@ def research(store, frames, names, spec, cost, report_dir, capital=10000, consum
         for fold_index, (train_start, test_start, test_end) in enumerate(fold_windows, start=1):
             logger.info("Research %s: optimizing forward fold %d/%d", name, fold_index, len(fold_windows))
             fold_winner, _ = optimize(frames, name, spec, cost, capital, train_start, test_start,
-                                      base=base, policy=policy, risk_fraction=risk_fraction,
+                                      base=candidate_bases[name], policy=policy, risk_fraction=risk_fraction,
                                       risk_limits=risk_limits, tune_stop_targets=tune_stop_targets,
                                       signal_templates=signal_templates)
             if fold_winner is None:
@@ -219,9 +200,9 @@ def research(store, frames, names, spec, cost, report_dir, capital=10000, consum
                   if evaluation_start is not None and pd.Timestamp(evaluation_start) < frames[entry_timeframe].index[0]
                   else 0,
               "policy": policy.model_dump(), "risk_fraction": risk_fraction,
-              "risk_limits": risk_limits.model_dump(), "parameters": base,
+              "risk_limits": risk_limits.model_dump(), "parameters": candidate_bases,
               "cost_assumptions": cost.model_dump(), "initial_capital": capital,
-              "entry_timeframe": entry_timeframe, "trend_timeframe": trend_timeframe,
+              "entry_timeframe": entry_timeframe,
               "tune_stop_targets": tune_stop_targets}
     baseline_results = {}
     for baseline in ("buy_hold", "ema_crossover"):
@@ -250,7 +231,7 @@ def research(store, frames, names, spec, cost, report_dir, capital=10000, consum
                           "strategy_config_hash": strategy.config_hash, "risk_fraction": risk_fraction,
                           "risk_limits": risk_limits.model_dump(), "cost": cost.model_dump(),
                           "capital": capital, "entry_timeframe": entry_timeframe,
-                          "trend_timeframe": trend_timeframe, "evaluation_start": str(holdout_start),
+                          "evaluation_start": str(holdout_start),
                           "evaluation_end_exclusive": str(end), "tune_stop_targets": tune_stop_targets}
         test = run_backtest(frames, generated, spec, cost, capital, risk_fraction, start=holdout_start, end=end,
                             timeframe=entry_timeframe, risk_limits=risk_limits, configuration=holdout_config)

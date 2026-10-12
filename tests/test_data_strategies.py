@@ -65,9 +65,10 @@ def test_future_candles_do_not_change_prior_signals(name, synthetic_frames):
 
 
 def test_configuration_change_invalidates_hash():
-    assert build("trend_pullback").config_hash != build("trend_pullback", {"stop_atr": 2}).config_hash
+    assert build("ict_sweep_mss_fvg").config_hash != build(
+        "ict_sweep_mss_fvg", {"swing_bars": 3}).config_hash
     with pytest.raises(ValueError):
-        build("trend_pullback", {"ema_fast": 300, "ema_slow": 200})
+        build("ict_sweep_mss_fvg", {"ema_fast": 50})
 
 
 def test_london_newyork_dst():

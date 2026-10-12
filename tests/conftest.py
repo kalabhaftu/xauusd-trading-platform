@@ -33,7 +33,7 @@ def broker(settings):
 @pytest.fixture
 def signal():
     now = utcnow()
-    return Signal(symbol="XAUUSD", strategy="trend_pullback", config_hash="test-config", direction=Direction.LONG,
+    return Signal(symbol="XAUUSD", strategy="ict_sweep_mss_fvg", config_hash="test-config", direction=Direction.LONG,
                   timestamp=now - timedelta(seconds=1), entry=2000, stop_loss=1990, take_profit=2020,
                   rationale="Synthetic software fixture; not research evidence", regime="test", indicators={"atr": 5},
                   expires_at=now + timedelta(minutes=15))

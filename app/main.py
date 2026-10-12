@@ -17,7 +17,10 @@ def configured(store=None):
         values = settings.model_dump()
         values.update(store.get("settings_override", {}))
         values.update(store.get("broker_override", {}))
-        values["active_strategy"] = store.get("selected_strategy", settings.active_strategy)
+        from app.strategies.registry import REGISTRY
+        selected = store.get("selected_strategy", settings.active_strategy)
+        fallback = settings.active_strategy if settings.active_strategy in REGISTRY else next(iter(REGISTRY))
+        values["active_strategy"] = selected if selected in REGISTRY else fallback
         settings = Settings(**values)
     return settings
 
@@ -30,13 +33,13 @@ def research_inputs(settings, store, args):
     if not source or not symbol:
         raise ValueError("Specify --source and --symbol or configure the verified broker")
     from app.data.validation import TIMEFRAMES
-    frames = research_frames(store, source, symbol, args.timeframe, args.trend_timeframe)
+    frames = research_frames(store, source, symbol, args.timeframe)
     if any(frame.empty for frame in frames.values()):
-        raise ValueError("Download the selected entry/trend broker timeframes before research")
+        raise ValueError("Download the selected entry timeframe before research")
     end = pd_timestamp(args.end) if args.end else frames[args.timeframe].index[-1] \
         + timedelta(minutes=TIMEFRAMES[args.timeframe])
     start = pd_timestamp(args.start) if args.start else end - timedelta(days=365 * 3)
-    # Keep completed observations before evaluation so EMA/ATR warm-up never becomes a scored trade.
+    # Keep prior completed bars so swing and rolling-zone state is ready at evaluation start.
     warmup_start = start - timedelta(days=90)
     frames = {tf: f.loc[(f.index >= warmup_start) & (f.index < end)] for tf, f in frames.items()}
     spec_data = store.get(f"spec:{source}:{symbol}")
@@ -241,7 +244,7 @@ def parser():
     download.add_argument("--refresh", action="store_true", help="Retry cached chunks with broker history gaps")
     for name in ("backtest", "compare-strategies", "validate-strategy"):
         research = sub.add_parser(name)
-        research.add_argument("--strategy", default="trend_pullback")
+        research.add_argument("--strategy", default="ict_sweep_mss_fvg")
         research.add_argument("--source")
         research.add_argument("--symbol")
         research.add_argument("--start")
@@ -255,12 +258,9 @@ def parser():
         research.add_argument("--risk-fraction", type=float)
         research.add_argument("--risk-limits-json", default="{}")
         research.add_argument("--parameters-json", default="{}")
-        research.add_argument("--fixed-stop-target", action="store_true",
-                              help="Use stop_atr/reward_risk from --parameters-json instead of searching the grid")
         research.add_argument("--margin", type=float, default=.01)
         research.add_argument("--policy", default="configs/research.json")
         research.add_argument("--timeframe", choices=["M1", "M5", "M15", "M30"], default="M15")
-        research.add_argument("--trend-timeframe", choices=["H1", "H4"], default="H1")
         if name == "validate-strategy":
             research.add_argument("--consume-holdout", action="store_true")
     for name, flag in (("arm-demo", "--confirm-first-order"),
@@ -358,7 +358,7 @@ def main(argv=None):
                 from app.backtesting.engine import run_backtest
                 parameters = {**store.get(f"strategy_parameters:{args.strategy}", {}),
                               **parameters_override,
-                              "entry_timeframe": args.timeframe, "trend_timeframe": args.trend_timeframe}
+                              "entry_timeframe": args.timeframe}
                 strategy = build(args.strategy, parameters)
                 result = run_backtest(frames, strategy.signals(frames, spec.symbol), spec, cost,
                                       args.capital, risk_fraction,
@@ -371,7 +371,6 @@ def main(argv=None):
                                           "risk_limits": risk_limits.model_dump(),
                                           "cost": cost.model_dump(), "capital": args.capital,
                                           "entry_timeframe": args.timeframe,
-                                          "trend_timeframe": args.trend_timeframe,
                                           "source": cost.source, "symbol": spec.symbol,
                                           "symbol_specification": spec.model_dump(mode="json"),
                                           "requested_start": evaluation_start.isoformat(),
@@ -394,7 +393,7 @@ def main(argv=None):
                                   evaluation_start=evaluation_start,
                                   risk_limits=risk_limits,
                                   base_parameters=parameters_override,
-                                  tune_stop_targets=not args.fixed_stop_target)
+                                  tune_stop_targets=False)
         if output is not None:
             print(json.dumps(output, indent=2, default=str, allow_nan=False))
         if research_job_key:

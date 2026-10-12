@@ -10,70 +10,75 @@ from app.domain import Direction, Model, Signal, digest
 
 
 class Parameters(Model):
+    """Settings shared by the strategy implementations."""
+
     entry_timeframe: Literal["M1", "M5", "M15", "M30"] = "M15"
-    trend_timeframe: Literal["H1", "H4"] = "H1"
-    atr_period: int = Field(default=14, ge=2, le=200)
-    stop_atr: float = Field(default=1.5, gt=0, le=10)
-    reward_risk: float = Field(default=2, gt=0, le=10)
-    ema_fast: int = Field(default=50, ge=2, le=500)
-    ema_slow: int = Field(default=200, ge=3, le=1000)
-    pullback_ema: int = Field(default=20, ge=2, le=200)
-    pullback_atr: float = Field(default=0.5, gt=0, le=5)
-    band_period: int = Field(default=20, ge=3, le=200)
-    band_std: float = Field(default=2, gt=0, le=5)
-    rsi_period: int = Field(default=14, ge=2, le=100)
-    rsi_low: float = Field(default=30, gt=0, lt=50)
-    rsi_high: float = Field(default=70, gt=50, lt=100)
-    adx_period: int = Field(default=14, ge=2, le=100)
-    adx_max: float = Field(default=20, gt=0, le=60)
-    breakout_buffer_atr: float = Field(default=0.1, ge=0, le=2)
-    london_open_hour: int = Field(default=8, ge=0, le=23)
-    new_york_open_hour: int = Field(default=8, ge=0, le=23)
-    pre_session_minutes: int = Field(default=60, ge=30, le=360)
-    entry_window_minutes: int = Field(default=120, ge=30, le=360)
-    breakout_holding_hours: int = Field(default=4, ge=1, le=24)
-    retest_max_bars: int = Field(default=3, ge=1, le=20)
-    retest: bool = False
-    max_holding_hours: int = Field(default=168, ge=1, le=720)
-    volatility_min_ratio: float = Field(default=0.5, gt=0)
-    volatility_max_ratio: float = Field(default=2, gt=0)
+    max_holding_hours: int = Field(default=24, ge=1, le=168)
+
+
+class IctParameters(Parameters):
+    # These numeric conventions make discretionary ICT concepts testable. They are
+    # configuration choices for this implementation, not universal ICT settings.
+    swing_bars: int = Field(default=2, ge=1, le=10)
+    max_level_age_bars: int = Field(default=96, ge=2, le=2000)
+    setup_expiry_bars: int = Field(default=24, ge=1, le=500)
+    minimum_reward_risk: float = Field(default=1.0, gt=0, le=10)
+
+
+class SupportResistanceParameters(Parameters):
+    # The cited study evaluated 60- and 240-minute windows. The default uses 240;
+    # the user can test the shorter window and other values on their own feed.
+    level_window_minutes: int = Field(default=240, ge=60, le=1440)
+    minimum_prior_bounces: int = Field(default=1, ge=0, le=20)
+    minimum_reward_risk: float = Field(default=1.0, gt=0, le=10)
 
 
 class Strategy:
     name = "base"
     description = ""
+    parameters_model = Parameters
+    rules_version = 1
 
-    def __init__(self, parameters: Parameters | None = None):
-        self.parameters = parameters or Parameters()
-        if self.parameters.ema_fast >= self.parameters.ema_slow:
-            raise ValueError("Fast EMA must be shorter than slow EMA")
-        if self.parameters.volatility_min_ratio >= self.parameters.volatility_max_ratio:
-            raise ValueError("Invalid volatility bounds")
-        if self.parameters.pre_session_minutes % TIMEFRAMES[self.parameters.entry_timeframe]:
-            raise ValueError("Pre-session range must contain a whole number of entry candles")
-        self.config_hash = digest({"strategy": self.name, "rules_version": 1,
+    def __init__(self, parameters: Parameters | dict | None = None):
+        if isinstance(parameters, self.parameters_model):
+            self.parameters = parameters
+        else:
+            values = parameters.model_dump() if isinstance(parameters, Model) else parameters or {}
+            self.parameters = self.parameters_model.model_validate(values)
+        self.config_hash = digest({"strategy": self.name, "rules_version": self.rules_version,
                                    "parameters": self.parameters.model_dump()})
 
     def signals(self, frames: dict[str, pd.DataFrame], symbol: str) -> list[Signal]:
         raise NotImplementedError
 
-    def make_signal(self, frame, index: int, symbol: str, direction: Direction, volatility: float,
-                    rationale: str, regime: str, indicators: dict, target: float | None = None,
-                    session: str = "continuous", exit_at=None) -> Signal | None:
-        p = self.parameters
+    def make_structural_signal(self, frame: pd.DataFrame, index: int, symbol: str,
+                               direction: Direction, stop: float, target: float,
+                               minimum_reward_risk: float, rationale: str,
+                               regime: str, indicators: dict[str, float]) -> Signal | None:
+        """Create a completed-candle signal with a structure-defined bracket."""
         entry = float(frame.close.iloc[index])
-        distance = volatility * p.stop_atr
         sign = 1 if direction == Direction.LONG else -1
-        stop = entry - sign * distance
-        take = target if target is not None else entry + sign * distance * p.reward_risk
-        if not np.isfinite([entry, distance, take, stop, *indicators.values()]).all() or distance <= 0:
+        risk = sign * (entry - stop)
+        reward = sign * (target - entry)
+        numeric_values = [entry, stop, target, *indicators.values()]
+        if not np.isfinite(numeric_values).all() or min(entry, stop, target) <= 0:
             return None
-        if sign * (take - entry) < distance:
+        if risk <= 0 or reward <= 0 or reward / risk < minimum_reward_risk:
             return None
-        minutes = TIMEFRAMES[p.entry_timeframe]
-        timestamp = (frame.index[index] + pd.Timedelta(minutes=minutes)).to_pydatetime()
-        return Signal(symbol=symbol, strategy=self.name, config_hash=self.config_hash,
-                      direction=direction, timestamp=timestamp, entry=entry, stop_loss=stop, take_profit=take,
-                      rationale=rationale, regime=regime, indicators=indicators, session=session,
-                      expires_at=timestamp + timedelta(minutes=minutes),
-                      exit_at=exit_at or timestamp + timedelta(hours=p.max_holding_hours))
+        timeframe = self.parameters.entry_timeframe
+        timestamp = (frame.index[index] + pd.Timedelta(minutes=TIMEFRAMES[timeframe])).to_pydatetime()
+        return Signal(
+            symbol=symbol,
+            strategy=self.name,
+            config_hash=self.config_hash,
+            direction=direction,
+            timestamp=timestamp,
+            entry=entry,
+            stop_loss=float(stop),
+            take_profit=float(target),
+            rationale=rationale,
+            regime=regime,
+            indicators=indicators,
+            expires_at=timestamp + timedelta(minutes=TIMEFRAMES[timeframe]),
+            exit_at=timestamp + timedelta(hours=self.parameters.max_holding_hours),
+        )

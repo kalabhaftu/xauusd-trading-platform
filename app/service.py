@@ -198,7 +198,9 @@ class DemoService:
             raise ValueError("Monitored strategy selection must be a list")
         strategy_names = [name for name in REGISTRY if name in requested]
         if not strategy_names:
-            raise ValueError("Select at least one strategy for the live monitor")
+            # Ignore names persisted by versions that used the old prototype rules.
+            strategy_names = ([self.settings.active_strategy] if self.settings.active_strategy in REGISTRY
+                              else list(REGISTRY))
         if self.cache_symbol != symbol:
             self.last_frames.clear()
             self.last_bars.clear()
@@ -208,7 +210,6 @@ class DemoService:
         needed_timeframes: dict[str, int] = {}
         for strategy in strategies:
             needed_timeframes[strategy.parameters.entry_timeframe] = 20
-            needed_timeframes[strategy.parameters.trend_timeframe] = 60
         for timeframe, days in needed_timeframes.items():
             current_bar = int(now.timestamp()) // (TIMEFRAMES[timeframe] * 60)
             if timeframe not in self.last_frames or current_bar != self.last_bars.get(timeframe):
@@ -242,9 +243,7 @@ class DemoService:
         entry_timeframes = set()
         for strategy in strategies:
             entry_timeframe = strategy.parameters.entry_timeframe
-            trend_timeframe = strategy.parameters.trend_timeframe
-            frames = {entry_timeframe: self.last_frames[entry_timeframe],
-                      trend_timeframe: self.last_frames[trend_timeframe]}
+            frames = {entry_timeframe: self.last_frames[entry_timeframe]}
             entry_frame = frames[entry_timeframe]
             entry_timeframes.add(entry_timeframe)
             last = entry_frame.index[-1] + timedelta(minutes=TIMEFRAMES[entry_timeframe])

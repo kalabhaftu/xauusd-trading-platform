@@ -8,7 +8,7 @@ from app.execution.signal_tracker import SignalOutcomeTracker
 
 def test_signal_only_tracker_uses_next_bar_and_conservative_stop_first(settings, store, broker):
     timestamp = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
-    signal = Signal(symbol="XAUUSD", strategy="trend_pullback", config_hash="fixture-config",
+    signal = Signal(symbol="XAUUSD", strategy="ict_sweep_mss_fvg", config_hash="fixture-config",
                     direction=Direction.LONG, timestamp=timestamp, entry=2000, stop_loss=1990,
                     take_profit=2020, rationale="deterministic unit fixture", regime="fixture",
                     indicators={"atr": 5}, expires_at=datetime(2026, 1, 5, 10, 15, tzinfo=UTC))

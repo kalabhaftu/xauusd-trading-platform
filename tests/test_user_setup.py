@@ -6,7 +6,7 @@ def test_gui_setup_persists_auto_preference_without_arming(settings, store):
         store, settings, mode="DEMO", account_login=12345, account_server="Exness-Demo",
         symbol="XAUUSDm", mt5_path=None,
         settings_changes={"risk_per_trade": .0025, "max_spread": .5,
-                          "session_file": None}, strategy="trend_pullback", execution_mode="AUTO_DEMO",
+                          "session_file": None}, strategy="ict_sweep_mss_fvg", execution_mode="AUTO_DEMO",
         telegram_preferences={"enabled": True, "events": ["signal", "position_update"],
                               "position_update_minutes": 15},
     )
@@ -24,7 +24,7 @@ def test_gui_setup_requires_matching_auto_mode(settings, store):
     with pytest.raises(ValueError, match="Choose Signal only"):
         save_user_setup(
             store, settings, mode="DEMO", account_login=12345, account_server="Exness-Demo",
-            symbol="XAUUSDm", mt5_path=None, settings_changes={}, strategy="trend_pullback",
+            symbol="XAUUSDm", mt5_path=None, settings_changes={}, strategy="ict_sweep_mss_fvg",
             execution_mode="AUTO_LIVE", telegram_preferences={},
         )
     assert store.get("setup_complete") is None

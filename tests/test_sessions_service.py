@@ -64,15 +64,15 @@ def test_monitor_strategy_selection_is_validated_and_clears_order_permission(set
     service = DemoService(settings, store, broker)
     account_key = broker.account().key
     store.set(f"armed:{account_key}", {"active": True, "config_hash": "old"})
-    store.enqueue("set-monitored-strategies", {"names": ["mean_reversion", "trend_pullback"]})
+    store.enqueue("set-monitored-strategies", {"names": ["support_resistance_bounce", "ict_sweep_mss_fvg"]})
 
     service.process_commands(Reconciliation(safe=True, reasons=[], positions=[]), book)
 
-    assert store.get("monitored_strategies") == ["mean_reversion", "trend_pullback"]
+    assert store.get("monitored_strategies") == ["support_resistance_bounce", "ict_sweep_mss_fvg"]
     assert store.get(f"armed:{account_key}") == {"active": False}
     store.enqueue("set-monitored-strategies", {"names": ["unknown"]})
     service.process_commands(Reconciliation(safe=True, reasons=[], positions=[]), book)
-    assert store.get("monitored_strategies") == ["mean_reversion", "trend_pullback"]
+    assert store.get("monitored_strategies") == ["support_resistance_bounce", "ict_sweep_mss_fvg"]
 
 
 def test_bot_position_alerts_once_then_every_fifteen_minutes(settings, store, broker):
@@ -152,14 +152,14 @@ def test_manual_position_is_reported_but_never_marked_as_bot_owned(settings, sto
 def test_monitoring_service_persists_real_adapter_state_disarmed(settings, store, broker):
     # Test fixtures are explicit and injected; runtime never substitutes this broker.
     now = utcnow()
-    for tf, freq, count in (("M15", "15min", 1000), ("H1", "1h", 1000)):
+    for tf, freq, count in (("M15", "15min", 1000),):
         index = pd.date_range(end=pd.Timestamp(now).floor(freq), periods=count, freq=freq)
         broker.frames[tf] = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
                                          "tick_volume": 1, "spread": 20, "real_volume": 0}, index=index)
     service = DemoService(settings, store, broker)
     service.cycle()
     assert store.get("service")["state"] == "RUNNING"
-    assert store.get("service")["strategies"] == ["trend_pullback", "session_breakout", "mean_reversion"]
+    assert store.get("service")["strategies"] == ["ict_sweep_mss_fvg", "support_resistance_bounce"]
     assert store.get("active_account")["equity"] == 10000
     assert broker.send_count == 0
     assert not store.load_candles("Exness-Demo", "XAUUSD", "M15").empty

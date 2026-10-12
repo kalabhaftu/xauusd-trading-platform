@@ -30,7 +30,6 @@ from app.execution.journal import trade_journal
 from app.indicators.core import atr, bollinger, ema, rsi
 from app.main import configured
 from app.monitoring.health import service_health
-from app.strategies.base import Parameters
 from app.strategies.registry import REGISTRY, build
 
 st.set_page_config(page_title="Aurum • XAU Research", page_icon="◈", layout="wide")
@@ -142,29 +141,20 @@ def display_records(table, limit=1000):
 
 
 PARAMETER_GROUPS = {
-    "Timeframes": ("entry_timeframe", "trend_timeframe"),
-    "Stops and exits": ("atr_period", "stop_atr", "reward_risk", "max_holding_hours"),
-    "Trend pullback": ("ema_fast", "ema_slow", "pullback_ema", "pullback_atr"),
-    "Mean reversion": ("band_period", "band_std", "rsi_period", "rsi_low", "rsi_high", "adx_period", "adx_max"),
-    "Session breakout": ("breakout_buffer_atr", "london_open_hour", "new_york_open_hour",
-                         "pre_session_minutes", "entry_window_minutes", "breakout_holding_hours",
-                         "retest_max_bars", "retest"),
-    "Volatility filter": ("volatility_min_ratio", "volatility_max_ratio"),
+    "Entry and trade management": ("entry_timeframe", "max_holding_hours"),
+    "ICT setup structure": ("swing_bars", "max_level_age_bars", "setup_expiry_bars"),
+    "Support and resistance": ("level_window_minutes", "minimum_prior_bounces"),
+    "Risk/reward filter": ("minimum_reward_risk",),
 }
 PARAMETER_HELP = {
-    "entry_timeframe": "Candles used to create entries. Only downloaded periods are available in Backtesting Lab.",
-    "trend_timeframe": "Completed higher-timeframe candles used to confirm direction.",
-    "stop_atr": "Stop distance as a multiple of ATR. Default is 1.5 ATR. Strategy comparisons can search the stop/target grid instead.",
-    "reward_risk": "Target distance divided by stop distance. Default is 2R. Strategy comparisons can search the stop/target grid instead.",
-    "pullback_atr": "Maximum distance from the entry EMA, measured in ATR.",
-    "breakout_buffer_atr": "Distance beyond the session range required before a breakout signal.",
-    "pre_session_minutes": "Length of the completed range immediately before each session opens.",
-    "entry_window_minutes": "How long after the local session open new breakout entries are allowed.",
-    "breakout_holding_hours": "Maximum hold time for a breakout position before the time exit.",
-    "retest": "Wait for price to return to the broken range edge before signaling.",
-    "max_holding_hours": "General position time exit used when a strategy has no earlier exit rule.",
-    "volatility_min_ratio": "Minimum ATR divided by its recent rolling median.",
-    "volatility_max_ratio": "Maximum ATR divided by its recent rolling median.",
+    "entry_timeframe": "Completed candles used to form and confirm the setup. Download this interval before a backtest.",
+    "max_holding_hours": "Close the position after this many hours if its structural stop or target has not been reached.",
+    "swing_bars": "Bars on each side required to confirm a swing. It becomes usable only after the right-side bars close.",
+    "max_level_age_bars": "Ignore an ICT swing after this many completed bars. This is an implementation setting, not a universal ICT rule.",
+    "setup_expiry_bars": "Cancel an ICT setup if its FVG return does not happen within this many bars.",
+    "level_window_minutes": "Rolling time window used to find support/resistance extrema. The study examined 60 and 240 minutes; the default is 240.",
+    "minimum_prior_bounces": "Earlier bounces required at a nearby level before another bounce can create a signal.",
+    "minimum_reward_risk": "Reject a setup when the structural target is closer than this multiple of its stop distance. This is configurable, not a proven optimum.",
 }
 
 
@@ -172,15 +162,17 @@ def strategy_parameter_inputs(name, existing, key_prefix, include_timeframes=Tru
     """Render typed editable rule controls; Pydantic remains the final validator."""
     current = build(name, existing).parameters
     values = current.model_dump()
-    fields = Parameters.model_fields
+    fields = type(current).model_fields
     with st.expander("Strategy rules and filters", expanded=False):
-        tabs = st.tabs(list(PARAMETER_GROUPS))
-        for tab, (group, field_names) in zip(tabs, PARAMETER_GROUPS.items()):
+        visible_groups = [(group, [field for field in group_fields if field in fields
+                                   and (include_timeframes or field != "entry_timeframe")])
+                          for group, group_fields in PARAMETER_GROUPS.items()]
+        visible_groups = [(group, names) for group, names in visible_groups if names]
+        tabs = st.tabs([group for group, _ in visible_groups])
+        for tab, (group, field_names) in zip(tabs, visible_groups):
             with tab:
                 columns = st.columns(2)
-                visible = [field for field in field_names
-                           if include_timeframes or field not in ("entry_timeframe", "trend_timeframe")]
-                for index, field_name in enumerate(visible):
+                for index, field_name in enumerate(field_names):
                     definition = fields[field_name]
                     label = field_name.replace("_", " ").title()
                     help_text = PARAMETER_HELP.get(field_name, f"Strategy rule setting for {label.lower()}.")
@@ -320,15 +312,9 @@ def candles_chart():
         age = (utcnow() - datetime.fromisoformat(quote['timestamp'])).total_seconds()
         st.caption(f"Spread: {quote['ask'] - quote['bid']:.4f} • quote: {local_time(quote['timestamp'])} • "
                    f"age: {age:.1f}s ({'fresh' if 0 <= age <= settings.quote_max_age_seconds else 'stale'})")
-    windows = []
-    breakout = Parameters(**store.get("strategy_parameters:session_breakout", {}))
-    for name, tz, hour in (("London", "Europe/London", breakout.london_open_hour),
-                           ("New York", "America/New_York", breakout.new_york_open_hour)):
-        now = utcnow().astimezone(ZoneInfo(tz))
-        opening = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if opening <= now < opening + pd.Timedelta(minutes=breakout.entry_window_minutes):
-            windows.append(name)
-    st.caption(f"Breakout entry windows: {', '.join(windows) or 'outside configured London/New York local windows'}")
+    current_strategy = build(settings.active_strategy,
+                             store.get(f"strategy_parameters:{settings.active_strategy}", {}))
+    st.caption(f"Active rule set: {current_strategy.name} • {current_strategy.description}")
 
 
 def launch_service():
@@ -829,8 +815,7 @@ elif page == "Strategies":
     parameters = strategy_parameter_inputs(name, existing, f"strategy_{name}")
     if st.button("Save strategy rules and set as primary", help="Validate and queue these rules. The monitor still checks every selected strategy; automatic orders need matching research approval and account permission."):
         try:
-            validated = Parameters(**parameters)
-            build(name, validated.model_dump())
+            validated = build(name, parameters).parameters
             store.enqueue("select-strategy", {"name": name, "parameters": validated.model_dump()})
             st.success("Configuration queued. Automatic orders stay blocked until matching approval exists.")
         except Exception as exc:
@@ -846,28 +831,21 @@ elif page == "Backtesting Lab":
                              help="Comparison and validation use chronological partitions. Full-range simulation is exploratory and cannot approve automation.")
     research_name = st.selectbox("Strategy to evaluate", list(REGISTRY)) \
         if operation != "compare-strategies" else None
-    parameter_strategy = research_name or st.selectbox("Rule settings template", list(REGISTRY),
-        help="For comparisons, these shared indicator and session settings are applied while stop/target combinations are also tested.")
+    parameter_strategy = research_name
     stored_timeframes = available_timeframes()
     entries = [tf for tf in ("M1", "M5", "M15", "M30") if tf in stored_timeframes]
-    trends = [tf for tf in ("H1", "H4") if tf in stored_timeframes]
-    if not entries or not trends:
-        st.warning("Download an entry timeframe (M1/M5/M15/M30) and trend timeframe (H1/H4).")
-        entries, trends = entries or ["M15"], trends or ["H1"]
+    if not entries:
+        st.warning("Download one entry timeframe (M1/M5/M15/M30) before running historical analysis.")
+        entries = ["M15"]
     timeframe = st.selectbox("Entry timeframe", entries, index=entries.index("M15") if "M15" in entries else 0,
                              help="Signals are generated from each completed candle at this interval.")
-    trend_timeframe = st.selectbox("Trend confirmation", trends,
-                                   index=trends.index("H1") if "H1" in trends else 0,
-                                   help="Trend rules use only higher-timeframe candles that had completed at the signal time.")
     first, second = st.columns(2)
     start = first.date_input("Start", value=(utcnow() - pd.Timedelta(days=365 * 3)).date(),
                              help="Beginning of the scored interval. Earlier stored candles may be used only for indicator warm-up.")
     end = second.date_input("End (exclusive)", value=utcnow().date(),
                             help="The end date is excluded from the backtest interval.")
     selected_history = store.load_candles(source, symbol, timeframe) if source and symbol else pd.DataFrame()
-    selected_trend_history = store.load_candles(source, symbol, trend_timeframe) \
-        if source and symbol else pd.DataFrame()
-    history_ready = not selected_history.empty and not selected_trend_history.empty
+    history_ready = not selected_history.empty
     if not selected_history.empty:
         coverage_start, coverage_end = selected_history.index[0], selected_history.index[-1]
         st.caption(f"Stored {timeframe} coverage: {coverage_start:%Y-%m-%d} through {coverage_end:%Y-%m-%d} "
@@ -875,7 +853,7 @@ elif page == "Backtesting Lab":
         if pd.Timestamp(start, tz="UTC") < coverage_start:
             st.warning(f"The requested start precedes stored {timeframe} history. The report will show the shortfall.")
     if not history_ready:
-        st.warning("The selected entry and confirmation candles are not both stored. Download them before analysis.")
+        st.warning("No stored candles exist for this entry interval. Download them before analysis.")
     if source and symbol:
         with store.engine.connect() as connection:
             coverage = connection.execute(select(candle_table.c.timeframe, func.count().label("candles"),
@@ -921,12 +899,14 @@ elif page == "Backtesting Lab":
     sizing_summary[0].metric("Hard per-trade cap", f"${capital * settings.hard_risk_max:,.2f}")
     sizing_summary[1].metric("Combined open-risk limit", f"${capital * portfolio_risk / 100:,.2f}")
     st.caption("Amounts are recalculated from the balance and percentages you enter. Broker minimum lot size may cause a trade to be skipped if it would exceed the risk cap.")
-    parameters = strategy_parameter_inputs(parameter_strategy,
-        store.get(f"strategy_parameters:{parameter_strategy}", {}), "backtest_rules", include_timeframes=False)
-    tune_stop_targets = True
-    if operation != "backtest":
-        tune_stop_targets = st.checkbox("Search alternative stop/target values", value=True,
-            help="On: test the built-in nine stop/target combinations. Off: use the exact ATR stop and reward/risk values above.")
+    if parameter_strategy:
+        parameters = strategy_parameter_inputs(parameter_strategy,
+            store.get(f"strategy_parameters:{parameter_strategy}", {}), "backtest_rules",
+            include_timeframes=False)
+    else:
+        parameters = {}
+        st.info("Comparison uses each strategy's own saved/default rules and the entry interval selected above.")
+    st.caption("Stops and targets follow each strategy's structure rules; the old generic ATR stop/target grid is no longer used.")
     with st.expander("Risk, costs, and execution assumptions", expanded=False):
         columns = st.columns(2)
         spread = columns[0].number_input("Spread (gold price units)", min_value=0.0,
@@ -973,7 +953,11 @@ elif page == "Backtesting Lab":
             st.error("Broker source, symbol, and a valid date range are required.")
         else:
             try:
-                validated_parameters = Parameters(**parameters).model_dump()
+                validated_parameters = (build(parameter_strategy, {
+                    **store.get(f"strategy_parameters:{parameter_strategy}", {}),
+                    **parameters,
+                    "entry_timeframe": timeframe,
+                }).parameters.model_dump() if parameter_strategy else {})
                 risk_limits = {"daily_loss_limit": day_loss / 100, "weekly_loss_limit": week_loss / 100,
                     "drawdown_limit": drawdown / 100, "consecutive_loss_limit": int(consecutive),
                     "max_orders_session": int(session_entries), "max_positions": int(max_positions),
@@ -985,14 +969,11 @@ elif page == "Backtesting Lab":
                     "--slippage", str(slippage), "--swap-long", str(swap_long), "--swap-short", str(swap_short),
                     "--margin", str(margin_percent / 100),
                     "--risk-fraction", str(risk_percent / 100), "--risk-limits-json", json.dumps(risk_limits),
-                    "--parameters-json", json.dumps(validated_parameters), "--timeframe", timeframe,
-                    "--trend-timeframe", trend_timeframe]
+                    "--parameters-json", json.dumps(validated_parameters), "--timeframe", timeframe]
                 if research_name:
                     command.extend(["--strategy", research_name])
                 if operation == "validate-strategy" and consume_holdout:
                     command.append("--consume-holdout")
-                if operation != "backtest" and not tune_stop_targets:
-                    command.append("--fixed-stop-target")
                 with open("logs/research-console.log", "a", encoding="utf-8") as log:
                     process = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=log,
                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -1063,19 +1044,17 @@ elif page == "Backtesting Lab":
                 "Positive forward folds": sum(1 for fold in candidate.get("folds", [])
                                                if (fold.get("expectancy") or 0) > 0),
                 "Forward folds": len(candidate.get("folds", [])),
-                "Stop ATR": (candidate.get("configuration") or {}).get("strategy_parameters", {}).get("stop_atr"),
-                "Reward / risk": (candidate.get("configuration") or {}).get("strategy_parameters", {}).get("reward_risk")}
+                "Rule parameters": json.dumps(candidate.get("parameters", {}), sort_keys=True)}
                 for index, candidate in enumerate(ranked_candidates)])
             st.dataframe(comparison, width="stretch", hide_index=True)
             st.caption("Ranking uses saved out-of-sample forward expectancy where available; it does not authorize trading.")
             for candidate in candidates:
                 sensitivity = candidate.get("sensitivity", [])
                 if sensitivity:
-                    with st.expander(f"{candidate.get('strategy', 'Strategy')} • training stop/target grid"):
-                        st.caption("These settings were screened on training data only. They do not include the untouched final holdout.")
+                    with st.expander(f"{candidate.get('strategy', 'Strategy')} • training candidate"):
+                        st.caption("The structural stop and target are part of the strategy rules. No generic ATR stop/target grid is applied.")
                         st.dataframe(pd.DataFrame([{
-                            "Stop ATR": row.get("parameters", {}).get("stop_atr"),
-                            "Reward / risk": row.get("parameters", {}).get("reward_risk"),
+                            "Rule parameters": json.dumps(row.get("parameters", {}), sort_keys=True),
                             "Training trades": (row.get("metrics") or {}).get("total_trades"),
                             "Training expectancy": (row.get("metrics") or {}).get("expectancy"),
                             "Training profit factor": (row.get("metrics") or {}).get("profit_factor"),
@@ -1089,7 +1068,7 @@ elif page == "Backtesting Lab":
             "strategy settings": best_candidate.get("parameters", payload.get("parameters")),
             "cost assumptions": payload.get("cost_assumptions"), "risk limits": payload.get("risk_limits"),
             "risk per trade": payload.get("risk_fraction"), "capital": payload.get("initial_capital"),
-            "timeframes": [payload.get("entry_timeframe"), payload.get("trend_timeframe")],
+            "timeframes": [payload.get("entry_timeframe")],
         }
         configuration_rows = flatten_values(configuration)
         if configuration_rows:
