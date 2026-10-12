@@ -31,7 +31,9 @@ def test_signal_only_tracker_uses_next_bar_and_conservative_stop_first(settings,
 def test_signal_only_tracker_does_not_assume_missing_costs_are_zero(store, broker):
     from app.config.settings import Settings
 
-    settings = Settings(_env_file=None, account_login=1, account_server="Exness-Demo", mt5_path="fixture")
+    settings = Settings(_env_file=None, account_login=1, account_server="Exness-Demo", mt5_path="fixture",
+                        commission_per_lot=None, slippage_price=None,
+                        swap_long_per_lot_day=None, swap_short_per_lot_day=None)
     timestamp = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
     signal = Signal(symbol="XAUUSD", strategy="test", config_hash="fixture-config", direction=Direction.LONG,
                     timestamp=timestamp, entry=2000, stop_loss=1990, take_profit=2020,

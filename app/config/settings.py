@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -6,7 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="XAU_", env_file=".env", extra="ignore", env_ignore_empty=True,
+    model_config = SettingsConfigDict(env_prefix="XAU_", env_file=os.environ.get("AURUM_SETTINGS_FILE", ".env"),
+                                      extra="ignore", env_ignore_empty=True,
                                       allow_inf_nan=False)
 
     mode: Literal["BACKTEST", "DEMO", "LIVE"] = "DEMO"
@@ -19,6 +21,7 @@ class Settings(BaseSettings):
     symbol: str | None = None
     session_file: Path | None = None
     active_strategy: str = "ict_sweep_mss_fvg"
+    cost_mode: Literal["AUTO", "CUSTOM"] = "AUTO"
     entries_armed: bool = False
     risk_per_trade: float = Field(default=0.0025, gt=0, le=0.005)
     hard_risk_max: float = Field(default=0.005, gt=0, le=0.005)
@@ -33,10 +36,10 @@ class Settings(BaseSettings):
     emergency_close_attempts: int = Field(default=3, ge=1, le=10)
     max_spread: float | None = Field(default=0.50, gt=0)
     max_slippage_points: int | None = Field(default=20, ge=0)
-    commission_per_lot: float | None = Field(default=None, ge=0)
+    commission_per_lot: float | None = Field(default=0, ge=0)
     slippage_price: float | None = Field(default=0.20, ge=0)
-    swap_long_per_lot_day: float | None = None
-    swap_short_per_lot_day: float | None = None
+    swap_long_per_lot_day: float | None = 0
+    swap_short_per_lot_day: float | None = 0
     quote_max_age_seconds: int = Field(default=10, ge=1)
     poll_seconds: float = Field(default=5, ge=1)
     magic: int = Field(default=260611, gt=0)
@@ -51,6 +54,11 @@ class Settings(BaseSettings):
             raise ValueError("risk_per_trade exceeds hard_risk_max")
         if self.entries_armed:
             raise ValueError("Entries cannot be armed by environment; use the audited account-specific arm command")
+        if self.cost_mode == "CUSTOM" and any(value is None for value in (
+            self.commission_per_lot, self.slippage_price,
+            self.swap_long_per_lot_day, self.swap_short_per_lot_day,
+        )):
+            raise ValueError("Custom cost mode needs commission, slippage, and both financing values")
         return self
 
     @property
@@ -64,8 +72,8 @@ class Settings(BaseSettings):
     def require_execution_environment(self) -> None:
         if self.mode not in ("DEMO", "LIVE"):
             raise ValueError("Broker execution requires explicitly configured DEMO or LIVE mode")
-        if not self.account_login or not self.account_server or not self.mt5_path:
-            raise ValueError("Explicit MT5 path, expected login, and server are required")
+        if not self.account_login or not self.account_server:
+            raise ValueError("MT5 account number and server are required")
 
     def require_demo(self) -> None:
         if self.mode != "DEMO":
@@ -77,7 +85,7 @@ class Settings(BaseSettings):
             self.commission_per_lot, self.slippage_price,
             self.swap_long_per_lot_day, self.swap_short_per_lot_day,
         )):
-            raise ValueError("Explicit commission, slippage, and long/short financing inputs are required")
+            raise ValueError("Cost values are incomplete. Select Automatic estimates or enter all broker costs in Custom mode.")
 
     def public(self) -> dict:
         return self.model_dump(mode="json", exclude={"account_password", "telegram_token", "telegram_chat_id"})

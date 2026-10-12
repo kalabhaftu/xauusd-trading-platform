@@ -237,7 +237,7 @@ def test_arming_refreshes_equity_before_authorization(settings, store, broker, m
     strategy = build(settings.active_strategy)
     cost = {"spread_price": settings.max_spread, "slippage_price": settings.slippage_price,
             "commission_per_lot": settings.commission_per_lot,
-            "swap_long_per_lot_day": 0, "swap_short_per_lot_day": 0}
+            "swap_long_per_lot_day": 0, "swap_short_per_lot_day": 0, "costs_verified": True}
     store.set(f"approval:{strategy.config_hash}", {"approved": True, "source": broker.account().server,
                "symbol": "XAUUSD", "cost": cost, "cost_hash": digest(cost),
                "risk_fraction": settings.risk_per_trade,

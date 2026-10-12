@@ -425,18 +425,47 @@ if page == "Getting Started":
     drawdown_pct = third.number_input("Maximum drawdown (%)", min_value=.1, max_value=50.0,
                                       value=settings.drawdown_limit * 100, step=.1,
                                       help="Blocks entries when equity falls this far from its recorded high-water mark.")
-    first, second, third = st.columns(3)
-    max_spread = first.number_input("Maximum spread (gold price units)", min_value=.001,
-                                    value=float(settings.max_spread or .5), step=.05, format="%.3f",
-                                    help="Rejects an entry when the live bid/ask spread exceeds this limit.")
-    max_slippage = second.number_input("Maximum slippage (MT5 points)", min_value=0,
-                                       value=int(settings.max_slippage_points or 0), step=1,
-                                       help="Maximum price deviation MT5 may accept from the requested price.")
-    entries_per_session = third.number_input("Entries per session", min_value=1, max_value=100,
-                                             value=settings.max_orders_session, step=1,
-                                             help="Limits new entries in each strategy session; continuous strategies use UTC days.")
+    entries_per_session = st.number_input("Entries per session", min_value=1, max_value=100,
+                                          value=settings.max_orders_session, step=1,
+                                          help="Limits new entries in each strategy session; continuous strategies use UTC days.")
 
     with st.expander("More risk and cost settings", expanded=False):
+        cost_mode = st.radio(
+            "Broker costs and execution limits", ["AUTO", "CUSTOM"],
+            index=1 if settings.cost_mode == "CUSTOM" else 0, horizontal=True,
+            format_func=lambda value: "Automatic estimates (recommended)" if value == "AUTO"
+            else "Enter my broker's values",
+            help="Automatic uses XAU starter limits and reads financing values from MT5 where supported. Choose custom only if you know your broker's fees.",
+        )
+        if cost_mode == "AUTO":
+            max_spread = float(settings.max_spread or .50)
+            max_slippage = int(settings.max_slippage_points or 20)
+            commission = float(settings.commission_per_lot or 0)
+            modeled_slippage = float(settings.slippage_price or .20)
+            swap_long = float(settings.swap_long_per_lot_day or 0)
+            swap_short = float(settings.swap_short_per_lot_day or 0)
+            st.info("Aurum uses a starter spread limit, converts its slippage allowance into your symbol's MT5 points, and reads swap values from MT5 when it can. MT5 does not report account commission through its Python API, so automatic mode estimates commission as zero. Backtests work with that estimate; a strategy cannot be approved for automatic orders until you confirm the broker costs in Custom mode.")
+        else:
+            first, second = st.columns(2)
+            max_spread = first.number_input("Maximum spread (gold price units)", min_value=.001,
+                                            value=float(settings.max_spread or .50), step=.05, format="%.3f",
+                                            help="Skip entries when the live bid/ask gap is larger than this value.")
+            max_slippage = second.number_input("Maximum slippage (MT5 points)", min_value=0,
+                                               value=int(settings.max_slippage_points or 20), step=1,
+                                               help="Largest price difference MT5 may accept when filling an order.")
+            first, second, third, fourth = st.columns(4)
+            commission = first.number_input("Commission per lot per side", min_value=0.0,
+                                            value=float(settings.commission_per_lot or 0), step=1.0,
+                                            help="Broker fee charged for one lot on one side of a trade.")
+            modeled_slippage = second.number_input("Estimated slippage per fill", min_value=0.0,
+                                                   value=float(settings.slippage_price or .20), step=.01, format="%.3f",
+                                                   help="Extra adverse price movement charged to each simulated fill.")
+            swap_long = third.number_input("Long overnight cost per lot/day",
+                                           value=float(settings.swap_long_per_lot_day or 0), step=1.0,
+                                           help="Daily broker financing for holding a buy position overnight.")
+            swap_short = fourth.number_input("Short overnight cost per lot/day",
+                                            value=float(settings.swap_short_per_lot_day or 0), step=1.0,
+                                            help="Daily broker financing for holding a sell position overnight.")
         first, second, third = st.columns(3)
         consecutive_losses = first.number_input("Losses before halt", min_value=1, max_value=20,
                                                 value=settings.consecutive_loss_limit, step=1,
@@ -447,17 +476,6 @@ if page == "Getting Started":
         close_attempts = third.number_input("Emergency close attempts", min_value=1, max_value=10,
                                             value=settings.emergency_close_attempts, step=1,
                                             help="Bounded retries for bot-owned positions that have no protective stop.")
-        first, second, third, fourth = st.columns(4)
-        commission = first.number_input("Commission per lot", min_value=0.0,
-                                        value=float(settings.commission_per_lot or 0), step=1.0,
-                                        help="Round-trip account-currency commission per lot used in backtests and signal tracking.")
-        modeled_slippage = second.number_input("Modeled slippage (price units)", min_value=0.0,
-                                               value=float(settings.slippage_price or 0), step=.01, format="%.3f",
-                                               help="Adverse price movement charged to simulated entry and exit fills.")
-        swap_long = third.number_input("Long financing per lot/day", value=float(settings.swap_long_per_lot_day or 0),
-                                       step=1.0, help="Broker's daily financing amount for a long position.")
-        swap_short = fourth.number_input("Short financing per lot/day", value=float(settings.swap_short_per_lot_day or 0),
-                                         step=1.0, help="Broker's daily financing amount for a short position.")
         session_path = st.text_input("Trading session schedule file (optional)",
                                      value=str(settings.session_file or ""),
                                      help="A current broker-exported schedule is required before the bot can authorize entries.")
@@ -515,6 +533,7 @@ if page == "Getting Started":
             if bool(telegram_token.strip()) != bool(telegram_chat.strip()):
                 raise ValueError("Enter both Telegram credential fields, or leave both blank")
             risk_changes = {
+                "cost_mode": cost_mode,
                 "risk_per_trade": risk_pct / 100, "hard_risk_max": hard_pct / 100,
                 "portfolio_risk_limit": portfolio_pct / 100, "daily_loss_limit": daily_pct / 100,
                 "weekly_loss_limit": weekly_pct / 100, "drawdown_limit": drawdown_pct / 100,
@@ -542,6 +561,9 @@ if page == "Getting Started":
                         f"{account_status.get('login')} on {account_status.get('server')}. "
                         f"MT5 Algo Trading: {'On' if account_status.get('terminal_algo_trading_allowed') else 'Off'}; "
                         f"Python API: {'Allowed' if account_status.get('external_api_allowed') else 'Blocked'}.")
+                automatic_costs = result.get("automatic_costs")
+                if automatic_costs and not automatic_costs.get("verified"):
+                    st.warning("Automatic costs are estimates. The broker connection does not report its commission schedule, so these settings can be used for research but cannot approve automatic orders until you confirm the fees in Custom mode.")
             else:
                 st.warning(result.get("broker", "Connection check did not return a result."))
             st.rerun()
@@ -908,6 +930,8 @@ elif page == "Backtesting Lab":
         st.info("Comparison uses each strategy's own saved/default rules and the entry interval selected above.")
     st.caption("Stops and targets follow each strategy's structure rules; the old generic ATR stop/target grid is no longer used.")
     with st.expander("Risk, costs, and execution assumptions", expanded=False):
+        if settings.cost_mode == "AUTO":
+            st.caption("Automatic starter assumptions are in use. Verify broker costs in Getting Started before treating a research result as approval evidence.")
         columns = st.columns(2)
         spread = columns[0].number_input("Spread (gold price units)", min_value=0.0,
             value=float(settings.max_spread or 0.0), step=0.01,
@@ -1019,6 +1043,8 @@ elif page == "Backtesting Lab":
         record = results[selected]
         payload = record["payload"]
         st.write(f"**{payload.get('status', payload.get('approval', 'Research run complete'))}**")
+        if payload.get("cost_review_required") or payload.get("cost_assumptions", {}).get("costs_verified") is False:
+            st.warning("This run used automatic cost estimates. Review broker fees in Getting Started before using research to approve automation.")
         if payload.get("initial_capital") is not None:
             st.caption(f"This historical simulation started with ${payload['initial_capital']:,.2f}. "
                        "Its simulated P&L is separate from MT5 account profit and loss.")

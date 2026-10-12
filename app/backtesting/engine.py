@@ -22,6 +22,7 @@ class CostProfile(Model):
     price_basis: str = "bid"
     margin_fraction: float = Field(default=0.01, gt=0, le=1)
     source: str = "explicit user-supplied assumptions"
+    costs_verified: bool = True
 
     def stressed(self, multiplier: float):
         return self.model_copy(update={"commission_per_lot": self.commission_per_lot * multiplier,

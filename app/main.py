@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import sys
 from datetime import timedelta
@@ -17,6 +18,12 @@ def configured(store=None):
         values = settings.model_dump()
         values.update(store.get("settings_override", {}))
         values.update(store.get("broker_override", {}))
+        if values.get("cost_mode", "AUTO") == "AUTO":
+            source = values.get("account_server")
+            selected_symbol = values.get("symbol") or store.get("active_symbol")
+            if source and selected_symbol:
+                auto_costs = store.get(f"auto_cost_profile:{source}:{selected_symbol}", {})
+                values.update(auto_costs.get("values", {}))
         from app.strategies.registry import REGISTRY
         selected = store.get("selected_strategy", settings.active_strategy)
         fallback = settings.active_strategy if settings.active_strategy in REGISTRY else next(iter(REGISTRY))
@@ -50,17 +57,21 @@ def research_inputs(settings, store, args):
     swap_long = args.swap_long if args.swap_long is not None else settings.swap_long_per_lot_day
     swap_short = args.swap_short if args.swap_short is not None else settings.swap_short_per_lot_day
     if any(value is None for value in (commission, slippage, swap_long, swap_short)):
-        raise ValueError("Set commission, slippage, and both swap assumptions in the lab or local .env")
+        raise ValueError("Choose automatic estimates or enter complete custom broker costs in Getting Started")
     spread = args.spread if args.spread is not None else settings.max_spread
     if spread is None:
         raise ValueError("Explicit --spread assumption or XAU_MAX_SPREAD is required")
     account = store.get("active_account", {})
+    custom_costs = settings.cost_mode == "CUSTOM"
+    profile = (store.get(f"auto_cost_profile:{source}:{symbol}", {}) if not custom_costs else {})
     cost = CostProfile(commission_per_lot=commission, spread_price=spread,
                        slippage_price=slippage,
                        swap_long_per_lot_day=swap_long,
                        swap_short_per_lot_day=swap_short,
                        account_currency=account.get("currency", "USD"), margin_fraction=args.margin,
-                       source=f"{source}:explicit cost profile")
+                       source=(f"{source}:user-entered costs" if custom_costs else
+                               f"{source}:automatic broker values and starter estimates"),
+                       costs_verified=custom_costs and profile.get("verified", True))
     store.set("research_source", source)
     store.set("research_cost", cost.model_dump())
     return frames, SymbolSpec(**spec_data), cost, start, end
@@ -104,6 +115,14 @@ def doctor(settings, store):
                           symbol=symbol, history_rows=len(frame), quote=broker.quote(symbol).model_dump(mode="json"))
             checks["symbol_specification"] = spec.model_dump(mode="json")
             checks["max_slippage_price"] = (settings.max_slippage_points or 0) * spec.point
+            if settings.cost_mode == "AUTO":
+                profile = broker.automatic_cost_profile(symbol, account.currency)
+                profile["values"].update({"max_spread": settings.max_spread or 0.50,
+                                          "max_slippage_points": max(
+                                              1, math.ceil((settings.slippage_price or 0.20) / spec.point)),
+                                          "slippage_price": settings.slippage_price or 0.20})
+                store.set(f"auto_cost_profile:{account.server}:{symbol}", profile)
+                checks["automatic_costs"] = {key: value for key, value in profile.items() if key != "values"}
             store.set("active_account", account)
             store.set("active_symbol", symbol)
             store.set(f"spec:{account.server}:{symbol}", spec)
@@ -172,7 +191,8 @@ def arm_execution(settings, store, args):
             symbol = broker.discover()
             spec = broker.spec(symbol)
             cost = approval.get("cost", {})
-            if not approval.get("approved") or approval.get("source") != account.server \
+            if not approval.get("approved") or not approval.get("cost", {}).get("costs_verified") \
+                    or approval.get("source") != account.server \
                     or approval.get("symbol") != symbol or approval.get("spec_hash") != digest(
                         spec.model_dump(exclude={"timestamp"})):
                 raise ValueError("No matching approved strategy/specification evidence")
@@ -378,6 +398,7 @@ def main(argv=None):
                 folder = export_report(result, settings.report_dir, args.strategy)
                 output = {"metrics": result["metrics"], "dataset_hash": result["dataset_hash"],
                           "report": str(folder.resolve()), "approval": "exploratory run only",
+                          "cost_review_required": not cost.costs_verified,
                           "configuration": result["configuration"], "risk_blocks": result["risk_blocks"],
                           "trade_count": len(result["trades"])}
                 store.record("backtest_results", output)

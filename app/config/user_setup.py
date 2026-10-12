@@ -1,5 +1,6 @@
 """GUI setup persistence for users who do not manage a local .env file."""
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ def save_user_setup(store, current: Settings, *, mode: str, account_login: int,
         raise ValueError("Choose a demo or live broker account")
     if account_login < 1 or not account_server.strip() or not symbol.strip():
         raise ValueError("Enter the account number, exact server name, and gold symbol")
-    editable = {"risk_per_trade", "hard_risk_max", "daily_loss_limit", "weekly_loss_limit",
+    editable = {"cost_mode", "risk_per_trade", "hard_risk_max", "daily_loss_limit", "weekly_loss_limit",
                 "drawdown_limit", "portfolio_risk_limit", "max_orders_session", "consecutive_loss_limit",
                 "loss_cooldown_minutes", "emergency_close_attempts", "max_spread", "max_slippage_points",
                 "commission_per_lot", "slippage_price", "swap_long_per_lot_day", "swap_short_per_lot_day",
@@ -45,12 +46,13 @@ def save_user_setup(store, current: Settings, *, mode: str, account_login: int,
     return validated
 
 
-def save_telegram_credentials(token: str, chat_id: str, env_path: Path = Path(".env")) -> None:
+def save_telegram_credentials(token: str, chat_id: str, env_path: Path | None = None) -> None:
     """Write Telegram secrets locally without displaying or committing them."""
     if not token.strip() or not chat_id.strip():
         raise ValueError("Enter both the Telegram bot token and destination chat ID")
     if any(character in token + chat_id for character in "\r\n"):
         raise ValueError("Telegram credentials must each fit on one line")
+    env_path = env_path or Path(os.environ.get("AURUM_SETTINGS_FILE", ".env"))
     assignments = {"XAU_TELEGRAM_TOKEN": token.strip(), "XAU_TELEGRAM_CHAT_ID": chat_id.strip()}
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     pending = dict(assignments)

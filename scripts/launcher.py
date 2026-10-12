@@ -1,9 +1,10 @@
-"""Small Windows GUI launcher for the project's local Python environment."""
+"""Windows launcher and embedded worker entry point for Aurum."""
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -15,43 +16,142 @@ from pathlib import Path
 from tkinter import StringVar, Tk, messagebox, ttk
 
 
-def find_project_root() -> Path | None:
-    starts = [Path(sys.executable).resolve().parent, Path.cwd()]
-    if not getattr(sys, "frozen", False):
-        starts.append(Path(__file__).resolve().parent.parent)
-    seen: set[Path] = set()
-    for start in starts:
-        for candidate in (start, *start.parents):
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if (candidate / "app" / "main.py").is_file() and (candidate / "app" / "dashboard" / "home.py").is_file():
-                return candidate
-    return None
+def is_packaged() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def runtime_root() -> Path:
+    if is_packaged():
+        return Path(getattr(sys, "_MEIPASS")).resolve()
+    return Path(__file__).resolve().parents[1]
+
+
+def user_data_root() -> Path:
+    if not is_packaged():
+        return runtime_root()
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return local_app_data / "Aurum"
+
+
+def configure_packaged_paths() -> tuple[Path, Path]:
+    """Keep user data outside the bundled app and any protected install folder."""
+    root = runtime_root()
+    data = user_data_root()
+    if is_packaged():
+        for folder in (data, data / "data", data / "reports", data / "logs", data / "tools"):
+            folder.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("AURUM_SETTINGS_FILE", str(data / "settings.env"))
+        database = (data / "data" / "platform.db").as_posix()
+        os.environ.setdefault("XAU_DATABASE_URL", f"sqlite:///{database}")
+        os.environ.setdefault("XAU_REPORT_DIR", str(data / "reports"))
+        os.environ.setdefault("XAU_SESSION_FILE", str(data / "data" / "xau_sessions.json"))
+        for name in ("ExportSessions.mq5", "SessionExporterEA.mq5"):
+            source = root / "scripts" / name
+            destination = data / "tools" / name
+            if source.is_file() and not destination.exists():
+                shutil.copy2(source, destination)
+    return root, data
 
 
 def check_project(root: Path | None) -> bool:
-    return bool(root and (root / ".venv" / "Scripts" / "python.exe").is_file()
-                and (root / ".env").is_file())
+    if root is None or not (root / "app" / "main.py").is_file():
+        return False
+    if is_packaged():
+        return all((root / path).is_file() for path in (
+            "app/dashboard/home.py", "configs/research.json", "alembic.ini", "migrations/env.py"))
+    return (root / ".venv" / "Scripts" / "python.exe").is_file()
+
+
+def _decode_status(output: str) -> dict | None:
+    decoder = json.JSONDecoder()
+    offset = 0
+    while (start := output.find("{", offset)) >= 0:
+        try:
+            value, _ = decoder.raw_decode(output[start:])
+        except json.JSONDecodeError:
+            offset = start + 1
+            continue
+        if isinstance(value, dict) and "service" in value and "account" in value:
+            return value
+        offset = start + 1
+    return None
+
+
+def _worker(arguments: list[str]) -> int:
+    root, _ = configure_packaged_paths()
+    if arguments == ["dashboard"]:
+        from streamlit.web import cli
+
+        dashboard = root / "app" / "dashboard" / "home.py"
+        sys.argv = ["streamlit", "run", str(dashboard), "--server.address", "127.0.0.1",
+                    "--server.port", "8501", "--server.headless", "true",
+                    "--browser.gatherUsageStats", "false"]
+        try:
+            cli.main()
+        except SystemExit as error:
+            return int(error.code or 0)
+        return 0
+    if len(arguments) >= 3 and arguments[:2] == ["-m", "app.main"]:
+        from app.main import main as application_main
+
+        return int(application_main(arguments[2:]) or 0)
+    return 2
+
+
+def _command(root: Path, data: Path, arguments: list[str]) -> list[str]:
+    if is_packaged():
+        return [sys.executable, "--worker", *arguments]
+    return [str(root / ".venv" / "Scripts" / "python.exe"), *arguments]
+
+
+def _worker_environment(packaged: bool) -> dict[str, str]:
+    environment = os.environ.copy()
+    if packaged:
+        # Long-lived workers must extract their own one-file runtime so they survive
+        # closing the launcher that started them.
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return environment
 
 
 def main() -> int:
-    root = find_project_root()
+    root, data = configure_packaged_paths()
+    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        return _worker(sys.argv[2:])
     if "--self-test" in sys.argv:
-        return 0 if check_project(root) else 2
-    if root is None:
-        messagebox.showerror("Aurum launcher", "Place AurumLauncher.exe in the project folder and try again.")
+        if not check_project(root):
+            return 2
+        if is_packaged():
+            try:
+                from streamlit.web import cli  # noqa: F401
+
+                import app.main  # noqa: F401
+            except Exception:
+                return 3
+        return 0
+    if not check_project(root):
+        messagebox.showerror("Aurum", "The application files are incomplete. Reinstall Aurum or contact its publisher.")
         return 2
 
-    python = root / ".venv" / "Scripts" / "python.exe"
+    packaged = is_packaged()
+    working_dir = data if packaged else root
     url = "http://127.0.0.1:8501"
-    root_logs = root / "logs"
-    root_logs.mkdir(exist_ok=True)
+    logs = data / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+
+    def app_command(*arguments: str) -> list[str]:
+        return _command(root, data, ["-m", "app.main", *arguments])
+
+    def dashboard_command() -> list[str]:
+        if packaged:
+            return _command(root, data, ["dashboard"])
+        return _command(root, data, ["-m", "streamlit", "run", "app/dashboard/home.py",
+                                     "--server.address", "127.0.0.1", "--server.port", "8501",
+                                     "--browser.gatherUsageStats", "false"])
 
     window = Tk()
     window.title("Aurum • XAU/USD Trading Platform")
-    window.geometry("650x485")
-    window.minsize(600, 450)
+    window.geometry("640x450")
+    window.minsize(590, 420)
     window.configure(bg="#111722")
     style = ttk.Style(window)
     style.theme_use("clam")
@@ -63,7 +163,7 @@ def main() -> int:
 
     mode_text = StringVar(value="Checking account and service state…")
     status_text = StringVar(value="Ready")
-    account_text = StringVar(value=f"Project: {root}")
+    account_text = StringVar(value=f"App data: {data}")
 
     container = ttk.Frame(window, padding=22)
     container.pack(fill="both", expand=True)
@@ -81,46 +181,41 @@ def main() -> int:
         action_grid.columnconfigure(col, weight=1)
 
     def invoke(arguments: list[str], log_name: str) -> subprocess.Popen:
-        with open(root_logs / log_name, "a", encoding="utf-8") as output:
-            return subprocess.Popen([str(python), *arguments], cwd=root, stdout=output, stderr=output,
+        with (logs / log_name).open("a", encoding="utf-8") as output:
+            return subprocess.Popen(arguments, cwd=working_dir, env=_worker_environment(packaged),
+                                    stdout=output, stderr=output,
                                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                                     close_fds=True)
 
     def status_snapshot() -> dict | None:
-        if not python.is_file():
-            return None
         try:
-            result = subprocess.run([str(python), "-m", "app.main", "status"], cwd=root, capture_output=True,
-                                    text=True, timeout=12, creationflags=subprocess.CREATE_NO_WINDOW
-                                    if os.name == "nt" else 0)
+            result = subprocess.run(app_command("status"), cwd=working_dir, env=os.environ.copy(), capture_output=True,
+                                    text=True, timeout=15,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             if result.returncode == 0:
-                return json.loads(result.stdout)
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                return _decode_status(result.stdout + "\n" + result.stderr)
+        except (OSError, subprocess.SubprocessError):
             return None
         return None
 
     def refresh_status() -> None:
         def work():
-            if not check_project(root):
-                window.after(0, lambda: mode_text.set("Setup needed • create .env and install the locked Python environment"))
-                return
             snapshot = status_snapshot()
             if not snapshot:
-                window.after(0, lambda: mode_text.set("Project is ready • no service status is available yet"))
+                window.after(0, lambda: mode_text.set("Ready • finish the account setup in Getting Started."))
                 return
             service = snapshot.get("service", {})
-            account = snapshot.get("account", {})
+            account = snapshot.get("account") or {}
             environment = account.get("environment", "not connected")
-            label = ("LIVE ACCOUNT • REAL MONEY • losses are real" if environment == "LIVE"
-                     else "DEMO ACCOUNT • simulated broker funds" if environment == "DEMO"
-                     else f"Configured environment: {environment}")
+            label = ("LIVE ACCOUNT • REAL MONEY" if environment == "LIVE"
+                     else "DEMO ACCOUNT • simulated funds" if environment == "DEMO"
+                     else "Account not connected yet")
             armed = snapshot.get("armed", {}).get("active", False)
-            mode = snapshot.get("execution_mode", "AUTO_DEMO")
             state = service.get("state", "STOPPED")
-            suffix = " • automatic order permission on" if armed else " • automatic order permission off"
-            summary = f"{label}\nService: {state} • Mode: {mode}{suffix}"
+            suffix = " • order permission on" if armed else " • order permission off"
+            summary = f"{label}\nMonitor: {state}{suffix}"
             if snapshot.get("halt", {}).get("active"):
-                summary += " • persistent halt active"
+                summary += " • safety halt active"
             window.after(0, lambda: mode_text.set(summary))
             if account:
                 window.after(0, lambda: account_text.set(
@@ -129,9 +224,6 @@ def main() -> int:
         threading.Thread(target=work, daemon=True).start()
 
     def open_dashboard() -> None:
-        if not check_project(root):
-            messagebox.showwarning("Setup required", "Run Setup / repair first, then configure the local .env file.")
-            return
         try:
             with urllib.request.urlopen(url + "/_stcore/health", timeout=2) as response:
                 if response.status == 200:
@@ -140,9 +232,8 @@ def main() -> int:
                     return
         except (OSError, urllib.error.URLError):
             pass
-        invoke(["-m", "streamlit", "run", "app/dashboard/home.py", "--server.address", "127.0.0.1",
-                "--server.port", "8501", "--browser.gatherUsageStats", "false"], "dashboard-console.log")
-        status_text.set("Starting the local dashboard…")
+        invoke(dashboard_command(), "dashboard.log")
+        status_text.set("Starting dashboard…")
 
         def wait_for_dashboard():
             for _ in range(40):
@@ -153,87 +244,86 @@ def main() -> int:
                             return
                 except (OSError, urllib.error.URLError):
                     time.sleep(0.5)
-            window.after(0, lambda: status_text.set("Dashboard did not start; see logs/dashboard-console.log"))
+            window.after(0, lambda: status_text.set("Dashboard could not start. Reopen Aurum and try again."))
 
         threading.Thread(target=wait_for_dashboard, daemon=True).start()
 
     def start_monitor() -> None:
-        if not check_project(root):
-            messagebox.showwarning("Setup required", "Run Setup / repair first, then configure the local .env file.")
-            return
         snapshot = status_snapshot()
         state = snapshot.get("service", {}).get("state", "STOPPED") if snapshot else "STOPPED"
         if state not in ("STOPPED", "STALE", "FAILED"):
-            messagebox.showinfo("Already running", f"Trading service status is {state}. No second service was started.")
+            messagebox.showinfo("Already running", f"The market monitor is {state}. No second monitor was started.")
             return
-        invoke(["-m", "app.main", "demo"], "service-console.log")
-        status_text.set("Monitor starting • checks all selected strategies • orders need approval and account permission")
+        if not snapshot or not snapshot.get("account"):
+            messagebox.showinfo("Finish setup first", "Open the dashboard and complete Getting Started before monitoring.")
+            open_dashboard()
+            return
+        invoke(app_command("demo"), "monitor.log")
+        status_text.set("Monitor starting • checks all selected strategies")
         refresh_status()
 
     def stop_monitor() -> None:
         try:
-            completed = subprocess.run([str(python), "-m", "app.main", "stop"], cwd=root, capture_output=True,
-                                       text=True, timeout=12, creationflags=subprocess.CREATE_NO_WINDOW
-                                       if os.name == "nt" else 0)
-            if completed.returncode == 0:
+            result = subprocess.run(app_command("stop"), cwd=working_dir, env=os.environ.copy(), capture_output=True,
+                                    text=True, timeout=15,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            if result.returncode == 0:
                 status_text.set("Graceful stop requested")
                 refresh_status()
             else:
-                messagebox.showerror("Stop failed", "See logs/service-console.log for details.")
+                messagebox.showerror("Stop failed", "Reopen Aurum and try the stop action again.")
         except (OSError, subprocess.SubprocessError):
-            messagebox.showerror("Stop failed", "Could not request a graceful service stop.")
+            messagebox.showerror("Stop failed", "Could not request a graceful stop.")
 
     def doctor() -> None:
-        if not check_project(root):
-            messagebox.showwarning("Setup required", "Run Setup / repair first, then configure the local .env file.")
-            return
-        status_text.set("Checking MT5 connection and market data…")
+        status_text.set("Checking the MT5 connection…")
 
         def work():
             try:
-                completed = subprocess.run([str(python), "-m", "app.main", "doctor"], cwd=root,
-                                           capture_output=True, text=True, timeout=45,
-                                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-                (root_logs / "doctor-console.log").write_text(completed.stdout + completed.stderr,
-                                                              encoding="utf-8")
-                report = json.loads(completed.stdout) if completed.stdout.strip() else {}
-                account = report.get("account", {})
-                label = report.get("broker", "Broker check did not complete")
+                result = subprocess.run(app_command("doctor"), cwd=working_dir, env=os.environ.copy(), capture_output=True,
+                                        text=True, timeout=60,
+                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                (logs / "connection-check.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+                report = _decode_status(result.stdout) if '"service"' in result.stdout else None
+                if not report:
+                    from json import JSONDecoder
+                    decoder = JSONDecoder()
+                    report = None
+                    for start in range(len(result.stdout)):
+                        if result.stdout[start] != "{":
+                            continue
+                        try:
+                            value, _ = decoder.raw_decode(result.stdout[start:])
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(value, dict) and "broker" in value:
+                            report = value
+                            break
+                account = (report or {}).get("account", {})
                 if account:
-                    label = (f"{account.get('environment')} account {account.get('login')} on "
-                             f"{account.get('server')} • {report.get('symbol', 'symbol unavailable')}\n"
-                             f"Trading permission: {account.get('trade_allowed')} • "
-                             f"External API permission: {account.get('external_api_allowed')}\n"
-                             "Read-only check; no orders submitted.")
-                if completed.returncode:
-                    label = f"Check failed • see logs/doctor-console.log\n{label}"
+                    message = (f"Connected to {account.get('environment')} account on {account.get('server')}.\n"
+                               f"Gold symbol: {report.get('symbol', 'not found')}\nRead-only check; no order was placed.")
+                else:
+                    message = (report or {}).get("broker", "Connection check did not complete.")
+                if result.returncode:
+                    message = "Check needs attention. Open Getting Started to review the account details.\n" + message
                 window.after(0, lambda: (status_text.set("Connection check finished"),
-                                         messagebox.showinfo("MT5 connection check", label)))
+                                         messagebox.showinfo("MT5 connection check", message)))
                 refresh_status()
-            except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+            except (OSError, subprocess.SubprocessError) as error:
                 error_text = str(error)
                 window.after(0, lambda: (status_text.set("Connection check failed"),
                                          messagebox.showerror("MT5 connection check", error_text)))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def setup() -> None:
-        if not (root / "scripts" / "setup.ps1").is_file():
-            messagebox.showerror("Setup unavailable", "scripts/setup.ps1 was not found in the project folder.")
-            return
-        try:
-            subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                              str(root / "scripts" / "setup.ps1")], cwd=root,
-                             creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0)
-            status_text.set("Setup launched in a PowerShell window")
-        except OSError as error:
-            messagebox.showerror("Setup failed", str(error))
-
     actions = [
         ("Open dashboard", open_dashboard), ("Start strategy monitor", start_monitor),
         ("Stop monitor gracefully", stop_monitor), ("Check MT5 connection", doctor),
-        ("Setup / repair Python", setup), ("Open project folder", lambda: os.startfile(root)),
+        ("Open app data folder", lambda: os.startfile(data)),
     ]
+    if not packaged:
+        actions.append(("Open developer project", lambda: os.startfile(root)))
     for index, (label, action) in enumerate(actions):
         ttk.Button(action_grid, text=label, command=action).grid(row=index // 2, column=index % 2,
                                                                 sticky="ew", padx=5, pady=5)
@@ -241,7 +331,8 @@ def main() -> int:
     ttk.Separator(container).pack(fill="x", pady=15)
     ttk.Label(container, textvariable=status_text, style="Sub.TLabel", wraplength=590).pack(anchor="w")
     ttk.Label(container,
-              text="Opening the dashboard alone does not scan the market. Start the strategy monitor to check all selected rules (all three are selected by default). Auto execute is only the mode; orders still need strategy approval and your account permission.",
+              text="Open the dashboard for setup and results. Start the monitor to scan the selected strategies. "
+                   "Auto execute is a preference; orders still require research approval and separate account authorization.",
               style="Sub.TLabel", wraplength=590).pack(anchor="w", pady=(9, 0))
 
     refresh_status()

@@ -41,6 +41,15 @@ def test_holdout_cannot_be_reopened(store, synthetic_frames, broker, tmp_path):
                  tmp_path, consume_holdout=True)
 
 
+def test_automatic_cost_estimates_cannot_consume_holdout(store, broker, tmp_path):
+    costs = CostProfile(commission_per_lot=0, spread_price=.5, slippage_price=.2,
+                        swap_long_per_lot_day=0, swap_short_per_lot_day=0,
+                        costs_verified=False, source="automatic test estimates")
+    with pytest.raises(ValueError, match="Verify broker commission"):
+        research(store, {}, [], broker.spec("XAUUSD"), costs, tmp_path, consume_holdout=True)
+    assert not any(row["key"].startswith("holdout_consumed:") for row in store.list_state("holdout_consumed:"))
+
+
 def test_complete_short_sample_comparison_reports_no_approval(store, synthetic_frames, broker, tmp_path):
     frames = {"M15": synthetic_frames["M15"].iloc[:1000]}
     cost = CostProfile(commission_per_lot=5, spread_price=.2, slippage_price=.1,

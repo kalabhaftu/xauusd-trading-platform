@@ -14,6 +14,7 @@ from app.domain import (
     Quote,
     SymbolSpec,
     TradingEnvironment,
+    utcnow,
 )
 
 
@@ -103,6 +104,59 @@ class MT5Broker:
                           filling_mode=info.filling_mode, trade_mode=info.trade_mode,
                           currency_profit=info.currency_profit, currency_margin=info.currency_margin,
                           price_basis="bid" if info.chart_mode == 0 else "last")
+
+    def automatic_cost_profile(self, symbol: str, account_currency: str) -> dict:
+        """Read swap values MT5 exposes; commission remains explicitly unverified."""
+        info = self._required(self.mt5.symbol_info(symbol), "symbol cost specification")
+        spec = self.spec(symbol)
+        quote = self.quote(symbol)
+        try:
+            mode = int(info.swap_mode)
+            long_swap = float(info.swap_long)
+            short_swap = float(info.swap_short)
+        except (TypeError, ValueError):
+            mode, long_swap, short_swap = -1, 0.0, 0.0
+        disabled = int(getattr(self.mt5, "SYMBOL_SWAP_MODE_DISABLED", 0))
+        points = int(getattr(self.mt5, "SYMBOL_SWAP_MODE_POINTS", 1))
+        deposit = int(getattr(self.mt5, "SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT", 4))
+        profit_currency = int(getattr(self.mt5, "SYMBOL_SWAP_MODE_CURRENCY_PROFIT", -1))
+        margin_currency = int(getattr(self.mt5, "SYMBOL_SWAP_MODE_CURRENCY_MARGIN", 3))
+        if mode == disabled:
+            long_value, short_value, swaps_verified = 0.0, 0.0, True
+            swap_source = "MT5 reports swaps disabled"
+        elif mode == points:
+            mid = (quote.bid + quote.ask) / 2
+            point_value = abs(self.profit(symbol, Direction.LONG, 1.0, mid, mid + spec.point))
+            long_value, short_value = long_swap * point_value, short_swap * point_value
+            swaps_verified = point_value > 0
+            swap_source = "MT5 point-based swap converted with broker profit calculation"
+        elif mode == deposit:
+            long_value, short_value = long_swap, short_swap
+            swaps_verified = bool(account_currency)
+            swap_source = "MT5 deposit-currency swap values"
+        elif mode == profit_currency and spec.currency_profit == account_currency:
+            long_value, short_value = long_swap, short_swap
+            swaps_verified = True
+            swap_source = "MT5 profit-currency swap values"
+        elif mode == margin_currency and spec.currency_margin == account_currency:
+            long_value, short_value = long_swap, short_swap
+            swaps_verified = True
+            swap_source = "MT5 margin-currency swap values"
+        else:
+            long_value, short_value, swaps_verified = 0.0, 0.0, False
+            swap_source = "MT5 swap unit requires manual review"
+        return {
+            "values": {"commission_per_lot": 0.0, "slippage_price": 0.20,
+                       "swap_long_per_lot_day": long_value, "swap_short_per_lot_day": short_value},
+            "verified": False,
+            "commission_verified": False,
+            "commission_source": "MT5 Python API does not provide the account commission schedule",
+            "swaps_verified": swaps_verified,
+            "swap_source": swap_source,
+            "observed_spread": quote.spread,
+            "point": spec.point,
+            "checked_at": utcnow().isoformat(),
+        }
 
     def quote(self, symbol: str) -> Quote:
         info = self._required(self.mt5.symbol_info_tick(symbol), "quote")

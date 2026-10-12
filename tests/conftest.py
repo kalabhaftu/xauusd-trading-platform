@@ -62,6 +62,7 @@ def permission(store, broker, signal):
                                                "fingerprint": permission_fingerprint(broker.settings)})
     store.set(f"approval:{signal.config_hash}", {"approved": True, "source": broker.account().server,
                                                 "symbol": signal.symbol,
+                                                "cost": {"costs_verified": True},
                                                 "risk_fraction": broker.settings.risk_per_trade,
                                                 "spec_hash": digest(broker.spec(signal.symbol).model_dump(
                                                     exclude={"timestamp"}))})

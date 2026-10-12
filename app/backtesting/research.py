@@ -109,6 +109,8 @@ def baseline_signals(frames, symbol, name, start=None, timeframe="M15"):
 def research(store, frames, names, spec, cost, report_dir, capital=10000, consume_holdout=False,
              policy=None, risk_fraction=.0025, evaluation_start=None, risk_limits=None, base_parameters=None,
              tune_stop_targets=True):
+    if consume_holdout and not cost.costs_verified:
+        raise ValueError("Verify broker commission, slippage, and financing in Getting Started before using the holdout")
     policy = policy or ResearchPolicy()
     risk_limits = risk_limits or BacktestRiskLimits()
     entry_timeframe = next(tf for tf in ("M1", "M5", "M15", "M30") if tf in frames)
@@ -202,6 +204,7 @@ def research(store, frames, names, spec, cost, report_dir, capital=10000, consum
               "policy": policy.model_dump(), "risk_fraction": risk_fraction,
               "risk_limits": risk_limits.model_dump(), "parameters": candidate_bases,
               "cost_assumptions": cost.model_dump(), "initial_capital": capital,
+              "cost_review_required": not cost.costs_verified,
               "entry_timeframe": entry_timeframe,
               "tune_stop_targets": tune_stop_targets}
     baseline_results = {}
@@ -242,7 +245,7 @@ def research(store, frames, names, spec, cost, report_dir, capital=10000, consum
         oos_trades = selected["validation"]["total_trades"] + metric["total_trades"]
         quality = [validate(f, tf) for tf, f in frames.items()]
         confirmed = store.get(f"coverage_confirmed:{dataset_hash}", False)
-        passed = bool(metric["expectancy"] and metric["expectancy"] > 0 and metric["profit_factor"]
+        passed = bool(cost.costs_verified and metric["expectancy"] and metric["expectancy"] > 0 and metric["profit_factor"]
                       and metric["profit_factor"] > policy.min_profit_factor
                       and metric["maximum_drawdown"] < policy.max_drawdown
                       and oos_trades >= policy.min_oos_trades

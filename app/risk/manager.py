@@ -38,7 +38,8 @@ class RiskManager:
         if not reconciliation.safe:
             raise ValueError("Position/order state has not reconciled safely")
         approval = self.store.get(f"approval:{signal.config_hash}", {})
-        if not approval.get("approved") or approval.get("symbol") != signal.symbol \
+        if not approval.get("approved") or not approval.get("cost", {}).get("costs_verified") \
+                or approval.get("symbol") != signal.symbol \
                 or approval.get("source") != account.server:
             raise ValueError("No matching evidence-backed strategy approval")
         if not book.get("baselines_verified"):
