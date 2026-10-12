@@ -134,11 +134,21 @@ def test_dashboard_marks_old_broker_position_snapshot_and_unrecognized_exposure(
 
 
 def test_dashboard_marks_daily_pnl_snapshot_stale(monkeypatch, store, broker):
+    from app.domain import utcnow
+
     monkeypatch.setenv("XAU_DATABASE_URL", str(store.engine.url))
     account = broker.account().model_dump(mode="json")
     store.set("active_account", account)
-    store.set("risk:" + broker.account().key, {"daily_pnl": -5.18, "weekly_pnl": -5.18,
+    account_key = broker.account().key
+    store.set("risk:" + account_key, {"daily_pnl": -5.18, "weekly_pnl": -5.18,
         "last_seen": "2020-01-01T00:00:00+00:00", "baselines_verified": False})
+    halt_time = utcnow().isoformat()
+    store.set("halt:" + account_key, {"active": True, "reason": "Broker or data verification failed",
+                                       "timestamp": halt_time})
+    store.record("errors", {"type": "BrokerError",
+                             "message": "Account trading or external API permission is disabled"}, account_key)
+    store.set("trading_permissions:" + account_key, {"blocked": False, "trade_allowed": True,
+                                                      "external_api_allowed": True})
     application = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app/dashboard/home.py"))
     application.run(timeout=30)
     application.sidebar.selectbox[0].set_value("Overview").run(timeout=30)
@@ -147,6 +157,8 @@ def test_dashboard_marks_daily_pnl_snapshot_stale(monkeypatch, store, broker):
     assert any("Risk figures are the last saved check" in item.value for item in application.warning)
     assert any("Refresh account, trades, and P&L from MT5" in item.label for item in application.button)
     assert any("trading monitor is stopped" in item.value for item in application.warning)
+    assert any("Original cause" in item.value and "MT5 now reports account trading and Python API access allowed"
+               in item.value for item in application.info)
 
     application.sidebar.selectbox[0].set_value("Backtesting Lab").run(timeout=30)
     assert not application.exception

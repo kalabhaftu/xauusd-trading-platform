@@ -53,6 +53,34 @@ def local_time(value):
         if value else "unavailable"
 
 
+def known_halt_context(account_key, halt):
+    """Explain the known MT5 permission halt without exposing arbitrary exception text."""
+    halted_at = halt.get("timestamp")
+    if not account_key or not halted_at:
+        return None
+    halt_time = pd.Timestamp(halted_at)
+    halt_time = halt_time.tz_localize("UTC") if halt_time.tzinfo is None else halt_time.tz_convert("UTC")
+    known_message = "Account trading or external API permission is disabled"
+    for row in store.list("errors", 5000, account_key):
+        payload = row.get("payload", {})
+        if payload.get("message") != known_message:
+            continue
+        error_time = pd.Timestamp(row["timestamp"])
+        error_time = error_time.tz_localize("UTC") if error_time.tzinfo is None else error_time.tz_convert("UTC")
+        if abs((error_time - halt_time).total_seconds()) > 180:
+            continue
+        permissions = store.get(f"trading_permissions:{account_key}", {})
+        if permissions.get("trade_allowed") is True and permissions.get("external_api_allowed") is True:
+            current = "MT5 now reports account trading and Python API access allowed. The halt stays active until safety checks pass and it is explicitly reset."
+        elif permissions.get("blocked") is True:
+            current = "MT5 still reports a trading permission blocker."
+        else:
+            current = "Current MT5 permissions have not been verified."
+        return (f"Original cause at {local_time(row['timestamp'])}: MT5 reported account trading or its "
+                f"external Python API permission was off. {current}")
+    return None
+
+
 def remove_saved_reports(paths):
     """Remove only report folders that resolve inside the configured reports directory."""
     root = settings.report_dir.resolve()
@@ -678,6 +706,9 @@ if page == "Overview":
         elif halt.get("active"):
             st.error(f"Auto execute is selected, but orders are blocked by a safety halt: "
                      f"{halt.get('reason', 'review required')}")
+            context = known_halt_context(account_key, halt)
+            if context:
+                st.info(context)
         elif reconciliation and not reconciliation.get("safe", False):
             reason = "; ".join(reconciliation.get("reasons", []))
             st.warning("Auto execute is selected, but the account has open exposure the bot cannot verify. "
@@ -1234,6 +1265,9 @@ elif page == "Risk Center":
     st.caption(f"Automatic order permission: {'On' if armed else 'Off'} • daily/weekly resets use UTC")
     if halt.get("active"):
         st.error(f"Persistent halt: {halt.get('reason', 'Safety verification required')}")
+        context = known_halt_context(account_key, halt)
+        if context:
+            st.info(context)
     if risk.get("last_seen"):
         st.caption(f"Risk last checked: {local_time(risk['last_seen'])}. "
                    f"Daily P&L: {risk.get('daily_pnl', 0):,.2f}; weekly P&L: {risk.get('weekly_pnl', 0):,.2f} "
