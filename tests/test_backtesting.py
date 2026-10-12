@@ -3,7 +3,7 @@ from datetime import timedelta
 import pandas as pd
 import pytest
 
-from app.backtesting.engine import CostProfile, run_backtest
+from app.backtesting.engine import BacktestRiskLimits, CostProfile, run_backtest
 from app.backtesting.research import partitions, walk_forward_windows
 from app.domain import Direction, Signal
 
@@ -104,3 +104,60 @@ def test_financing_reconciles_trade_and_equity(broker):
     assert trade.Financing == pytest.approx(-.12)
     assert trade.ExitTime == pd.Timestamp(signal.exit_at)
     assert result["equity"].Equity.iloc[-1] - 10000 == pytest.approx(trade.PnL)
+
+
+def test_persistent_consecutive_loss_limit_blocks_later_entries(broker):
+    index = pd.date_range("2024-01-01", periods=10, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    frame.loc[index[3], ["high", "low"]] = [2025, 1985]
+    frame.loc[index[6], ["high", "low"]] = [2025, 1985]
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+        timestamp=index[2].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+        rationale="first expected loss", regime="test", indicators={"atr": 5}),
+        Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+        timestamp=index[4].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+        rationale="blocked after loss", regime="test", indicators={"atr": 5})]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost,
+                          risk_limits=BacktestRiskLimits(consecutive_loss_limit=1))
+    assert len(result["trades"]) == 1
+    assert result["risk_blocks"]["consecutive_loss_limit"] == 1
+
+
+def test_daily_loss_limit_blocks_entries_after_equity_breaches_threshold(broker):
+    index = pd.date_range("2024-01-01", periods=10, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    frame.loc[index[3], ["high", "low"]] = [2025, 1985]
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+        timestamp=index[2].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+        rationale="first expected loss", regime="test", indicators={"atr": 5}),
+        Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+        timestamp=index[4].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+        rationale="blocked by daily loss", regime="test", indicators={"atr": 5})]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    limits = BacktestRiskLimits(daily_loss_limit=0.001, consecutive_loss_limit=5)
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost, risk_limits=limits)
+    assert len(result["trades"]) == 1
+    assert result["risk_blocks"]["daily_loss_limit"] == 1
+
+
+def test_configured_position_count_allows_more_than_one_simulated_position(broker):
+    index = pd.date_range("2024-01-01", periods=10, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+        timestamp=index[2].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+        rationale="first position", regime="test", indicators={"atr": 5}),
+        Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.SHORT,
+        timestamp=index[3].to_pydatetime(), entry=2000, stop_loss=2010, take_profit=1980,
+        rationale="second position", regime="test", indicators={"atr": 5})]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    limits = BacktestRiskLimits(max_positions=2, portfolio_risk_limit=0.005)
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost,
+                          risk_fraction=0.001, risk_limits=limits)
+    assert len(result["trades"]) == 2

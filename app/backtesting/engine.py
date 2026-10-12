@@ -31,6 +31,18 @@ class CostProfile(Model):
                                        "swap_short_per_lot_day": min(0, self.swap_short_per_lot_day) * multiplier})
 
 
+class BacktestRiskLimits(Model):
+    """Portfolio limits applied to every historical entry decision."""
+
+    daily_loss_limit: float = Field(default=0.01, gt=0, le=0.1)
+    weekly_loss_limit: float = Field(default=0.03, gt=0, le=0.2)
+    drawdown_limit: float = Field(default=0.10, gt=0, le=0.5)
+    consecutive_loss_limit: int = Field(default=3, ge=1)
+    max_orders_session: int = Field(default=3, ge=1)
+    max_positions: int = Field(default=1, ge=1, le=10)
+    portfolio_risk_limit: float = Field(default=0.005, gt=0, le=0.02)
+
+
 class CFDBroker(_Broker):
     """Pinned Backtesting.py extension: each integer unit is one broker volume step.
 
@@ -79,6 +91,8 @@ class CFDBroker(_Broker):
         if sign < 0:
             sl -= self.spread_absolute
             tp -= self.spread_absolute
+        if isinstance(tag, dict):
+            tag = {**tag, "estimated_stop_risk_usd": risk_per_unit * quantity}
         super()._open_trade(price, sign * quantity, sl, tp, time_index, tag)
 
     def next(self):
@@ -105,7 +119,8 @@ class CFDBroker(_Broker):
 def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: SymbolSpec, cost: CostProfile,
                  capital: float = 10000, risk_fraction: float = 0.0025,
                  start: pd.Timestamp | None = None, end: pd.Timestamp | None = None,
-                 timeframe="M15") -> dict:
+                 timeframe="M15", risk_limits: BacktestRiskLimits | None = None,
+                 configuration: dict | None = None) -> dict:
     if capital <= 0 or not 0 < risk_fraction <= 0.005:
         raise ValueError("Invalid capital or risk fraction")
     if cost.account_currency != "USD" or spec.currency_profit != "USD" or cost.price_basis != "bid" \
@@ -127,21 +142,67 @@ def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: S
                if (start is None or pd.Timestamp(s.timestamp) >= start)
                and (end is None or pd.Timestamp(s.timestamp) < end)}
     financing = []
+    limits = risk_limits or BacktestRiskLimits()
+    risk_events: dict[str, int] = {}
 
     class SignalAdapter(Strategy):
         def init(self):
-            pass
+            self._risk_day = None
+            self._risk_week = None
+            self._day_equity = capital
+            self._week_equity = capital
+            self._high_water = capital
+            self._loss_streak = 0
+            self._seen_closes = 0
+            self._session_entries: dict[str, int] = {}
 
         def next(self):
             stamp = self.data.index[-1]
+            utc = pd.Timestamp(stamp).tz_convert("UTC")
+            day_key = utc.date()
+            monday_key = day_key - pd.Timedelta(days=day_key.weekday())
+            current_equity = float(self.equity)
+            if self._risk_day != day_key:
+                self._risk_day, self._day_equity = day_key, current_equity
+            if self._risk_week != monday_key:
+                self._risk_week, self._week_equity = monday_key, current_equity
+            self._high_water = max(self._high_water, current_equity)
+            broker = self._broker
+            closed = self.closed_trades
+            while self._seen_closes < len(closed):
+                trade = closed[self._seen_closes]
+                swap = broker.closed_financing[self._seen_closes] if self._seen_closes < len(
+                    broker.closed_financing) else 0.0
+                net = float(trade.pl) + float(swap)
+                self._loss_streak = self._loss_streak + 1 if net < 0 else 0
+                self._seen_closes += 1
             for trade in self.trades:
                 metadata = trade.tag or {}
                 if metadata.get("exit_at") and stamp + pd.Timedelta(minutes=minutes) >= pd.Timestamp(metadata["exit_at"]):
                     trade.close()
-            if self.position or self.orders:
+            if len(self.trades) >= limits.max_positions:
+                risk_events["max_positions"] = risk_events.get("max_positions", 0) + 1
                 return
             proposed = mapping.get(stamp)
             if proposed is None or (proposed.expires_at and stamp > pd.Timestamp(proposed.expires_at)):
+                return
+            day_loss = max(0.0, (self._day_equity - current_equity) / max(self._day_equity, 1.0))
+            week_loss = max(0.0, (self._week_equity - current_equity) / max(self._week_equity, 1.0))
+            drawdown = max(0.0, (self._high_water - current_equity) / max(self._high_water, 1.0))
+            blocked = None
+            if day_loss >= limits.daily_loss_limit:
+                blocked = "daily_loss_limit"
+            elif week_loss >= limits.weekly_loss_limit:
+                blocked = "weekly_loss_limit"
+            elif drawdown >= limits.drawdown_limit:
+                blocked = "drawdown_limit"
+            elif self._loss_streak >= limits.consecutive_loss_limit:
+                blocked = "consecutive_loss_limit"
+            session_key = proposed.session if proposed.session != "continuous" else utc.date().isoformat()
+            if blocked is None and self._session_entries.get(session_key, 0) >= limits.max_orders_session:
+                blocked = "max_orders_session"
+            if blocked:
+                risk_events[blocked] = risk_events.get(blocked, 0) + 1
                 return
             sign = 1 if proposed.direction == Direction.LONG else -1
             indicative = float(self.data.Close[-1]) + (cost.spread_price + cost.slippage_price) * multiplier \
@@ -156,16 +217,27 @@ def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: S
                            math.floor(spec.volume_max / spec.volume_step))
             if quantity * spec.volume_step < spec.volume_min:
                 return
+            horizon_days = max(1, math.ceil((pd.Timestamp(proposed.exit_at) - utc).total_seconds() / 86400)) \
+                if proposed.exit_at else 7
+            swap = cost.swap_long_per_lot_day if sign > 0 else cost.swap_short_per_lot_day
+            projected_unit_risk = distance + fees + max(0, -swap) * spec.volume_step * horizon_days
+            open_risk = sum(float((trade.tag or {}).get("estimated_stop_risk_usd", 0)) for trade in self.trades)
+            if open_risk + quantity * projected_unit_risk > current_equity * limits.portfolio_risk_limit:
+                risk_events["portfolio_risk_limit"] = risk_events.get("portfolio_risk_limit", 0) + 1
+                return
             metadata = {"strategy": proposed.strategy, "session": proposed.session, "regime": proposed.regime,
                         "rationale": proposed.rationale, "risk_unit": distance,
                         "exit_at": proposed.exit_at.isoformat() if proposed.exit_at else None}
             action = self.buy if proposed.direction == Direction.LONG else self.sell
             action(size=quantity, sl=proposed.stop_loss * multiplier, tp=proposed.take_profit * multiplier,
                    tag=metadata)
+            # Count requested entries conservatively, including broker-simulation rejections.
+            self._session_entries[session_key] = self._session_entries.get(session_key, 0) + 1
 
     test = Backtest(data, SignalAdapter, cash=capital, commission=lambda size, price:
                     abs(size) * spec.volume_step * cost.commission_per_lot,
-                    margin=cost.margin_fraction, trade_on_close=False, exclusive_orders=False, finalize_trades=True)
+                    margin=cost.margin_fraction, trade_on_close=False, exclusive_orders=False,
+                    hedging=limits.max_positions > 1, finalize_trades=True)
     instances = []
 
     def broker_factory(**kwargs):
@@ -187,8 +259,10 @@ def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: S
                 trades[column] /= multiplier
         trades["R"] = [pnl / (abs(size) * tag["risk_unit"]) if tag["risk_unit"] else np.nan
                        for pnl, size, tag in zip(trades.PnL, trades.Size, trades.Tag)]
+        trades["InitialRiskUSD"] = [tag.get("estimated_stop_risk_usd") for tag in trades.Tag]
         for key in ("strategy", "session", "regime", "rationale"):
             trades[key] = [tag.get(key) for tag in trades.Tag]
+        trades.drop(columns=["Tag"], inplace=True)
     if start is not None:
         equity = equity.loc[equity.index >= start]
     from app.backtesting.metrics import metrics
@@ -196,4 +270,6 @@ def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: S
     return {"metrics": summary, "trades": trades, "equity": equity,
             "cost": cost.model_dump(), "spec": spec.model_dump(mode="json"),
             "dataset_hash": digest({tf: f.to_json(date_format="iso") for tf, f in frames.items()}),
-            "engine": "backtesting.py 0.6.5 + CFDBroker v1", "entry_timeframe": timeframe}
+            "engine": "backtesting.py 0.6.5 + CFDBroker v1", "entry_timeframe": timeframe,
+            "risk_limits": limits.model_dump(), "risk_blocks": risk_events,
+            "configuration": configuration or {"risk_fraction": risk_fraction, "timeframe": timeframe}}

@@ -13,4 +13,4 @@ if (Test-Path -LiteralPath 'requirements.lock') {
 }
 if ($LASTEXITCODE -ne 0) { throw 'Project installation failed' }
 if (-not (Test-Path -LiteralPath '.env')) { Copy-Item -LiteralPath '.env.example' -Destination '.env' }
-Write-Output 'Configure local demo credentials in .env, then run python -m app.main doctor. Entries remain disarmed.'
+Write-Output 'Configure the intended DEMO or LIVE account locally in .env, then run python -m app.main doctor. Automatic orders remain off until authorized.'

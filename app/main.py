@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from datetime import timedelta
 
@@ -35,25 +36,31 @@ def research_inputs(settings, store, args):
     end = pd_timestamp(args.end) if args.end else frames[args.timeframe].index[-1] \
         + timedelta(minutes=TIMEFRAMES[args.timeframe])
     start = pd_timestamp(args.start) if args.start else end - timedelta(days=365 * 3)
-    # Preserve warm-up before requested start, with evaluation beginning at the requested start.
-    frames = {tf: f.loc[(f.index >= start) & (f.index < end)] for tf, f in frames.items()}
+    # Keep completed observations before evaluation so EMA/ATR warm-up never becomes a scored trade.
+    warmup_start = start - timedelta(days=90)
+    frames = {tf: f.loc[(f.index >= warmup_start) & (f.index < end)] for tf, f in frames.items()}
     spec_data = store.get(f"spec:{source}:{symbol}")
     if not spec_data:
         raise ValueError("No broker specification snapshot; download-data/doctor must retrieve it")
-    settings.require_costs()
+    commission = args.commission if args.commission is not None else settings.commission_per_lot
+    slippage = args.slippage if args.slippage is not None else settings.slippage_price
+    swap_long = args.swap_long if args.swap_long is not None else settings.swap_long_per_lot_day
+    swap_short = args.swap_short if args.swap_short is not None else settings.swap_short_per_lot_day
+    if any(value is None for value in (commission, slippage, swap_long, swap_short)):
+        raise ValueError("Set commission, slippage, and both swap assumptions in the lab or local .env")
     spread = args.spread if args.spread is not None else settings.max_spread
     if spread is None:
         raise ValueError("Explicit --spread assumption or XAU_MAX_SPREAD is required")
     account = store.get("active_account", {})
-    cost = CostProfile(commission_per_lot=settings.commission_per_lot, spread_price=spread,
-                       slippage_price=settings.slippage_price,
-                       swap_long_per_lot_day=settings.swap_long_per_lot_day,
-                       swap_short_per_lot_day=settings.swap_short_per_lot_day,
+    cost = CostProfile(commission_per_lot=commission, spread_price=spread,
+                       slippage_price=slippage,
+                       swap_long_per_lot_day=swap_long,
+                       swap_short_per_lot_day=swap_short,
                        account_currency=account.get("currency", "USD"), margin_fraction=args.margin,
                        source=f"{source}:explicit cost profile")
     store.set("research_source", source)
     store.set("research_cost", cost.model_dump())
-    return frames, SymbolSpec(**spec_data), cost
+    return frames, SymbolSpec(**spec_data), cost, start, end
 
 
 def pd_timestamp(value):
@@ -64,7 +71,8 @@ def pd_timestamp(value):
 
 def doctor(settings, store):
     import importlib.util
-    checks = {"database": "ok", "mode": settings.mode, "entries": "disarmed unless audited permission exists",
+    checks = {"database": "ok", "mode": settings.mode,
+              "automatic_orders": "blocked until explicit account authorization and safety checks pass",
               "execution_tolerances": {"max_spread_price": settings.max_spread,
                                        "max_slippage_points": settings.max_slippage_points,
                                        "modeled_slippage_price": settings.slippage_price},
@@ -74,22 +82,51 @@ def doctor(settings, store):
     with store.engine.connect() as conn:
         checks["sqlite_integrity"] = conn.execute(text("PRAGMA integrity_check")).scalar()
     from app.broker.mt5_client import MT5Broker
+    from app.service import AccountMutex
     broker = MT5Broker(settings)
     try:
-        broker.connect()
-        account = broker.account()
-        symbol = broker.discover()
-        spec = broker.spec(symbol)
-        now = utcnow()
-        frame = broker.candles(symbol, "M15", now - timedelta(days=3), now)
-        checks.update(account={"login": account.login, "server": account.server, "environment": account.environment},
-                      symbol=symbol, history_rows=len(frame), quote=broker.quote(symbol).model_dump(mode="json"))
-        checks["symbol_specification"] = spec.model_dump(mode="json")
-        checks["max_slippage_price"] = (settings.max_slippage_points or 0) * spec.point
-        store.set("active_account", account)
-        store.set("active_symbol", symbol)
-        store.set(f"spec:{account.server}:{symbol}", spec)
-        checks["broker"] = "verified DEMO; no orders submitted"
+        with AccountMutex(f"{settings.account_server}:{settings.account_login}"):
+            broker.connect()
+            account = broker.account()
+            symbol = broker.discover()
+            spec = broker.spec(symbol)
+            now = utcnow()
+            frame = broker.candles(symbol, "M15", now - timedelta(days=3), now)
+            checks.update(account={"login": account.login, "server": account.server, "company": account.company,
+                                  "environment": account.environment, "currency": account.currency,
+                                  "trade_allowed": account.trade_allowed,
+                                  "expert_allowed": account.expert_allowed,
+                                  "terminal_algo_trading_allowed": account.terminal_trade_allowed,
+                                  "external_api_allowed": account.external_api_allowed},
+                          symbol=symbol, history_rows=len(frame), quote=broker.quote(symbol).model_dump(mode="json"))
+            checks["symbol_specification"] = spec.model_dump(mode="json")
+            checks["max_slippage_price"] = (settings.max_slippage_points or 0) * spec.point
+            store.set("active_account", account)
+            store.set("active_symbol", symbol)
+            store.set(f"spec:{account.server}:{symbol}", spec)
+            history_start = store.get(f"history_start:{account.key}")
+            start = pd_timestamp(history_start).to_pydatetime() if history_start else now - timedelta(days=35)
+            new_deals = 0
+            deals = broker.history(start, now)
+            hidden_before = store.get(f"history_hidden_before:{account.key}")
+            hidden_epoch = pd_timestamp(hidden_before).timestamp() if hidden_before else None
+            for deal in deals:
+                if hidden_epoch is not None and deal.get("time", 0) < hidden_epoch:
+                    continue
+                if store.record("broker_deals", deal, account.key, f"{account.key}:{deal['ticket']}"):
+                    new_deals += 1
+            store.record("equity_snapshots", account, account.key)
+            from app.execution.reconciliation import reconcile
+            reconciliation = reconcile(broker, store, settings)
+            from app.risk.limits import update_risk_snapshot
+            risk = update_risk_snapshot(store, account, deals, now, settings.magic)
+            checks["risk_snapshot"] = {key: risk.get(key) for key in
+                                        ("daily_pnl", "weekly_pnl", "daily_loss", "weekly_loss",
+                                         "drawdown", "baselines_verified", "last_seen")}
+            checks["positions"] = {"open": len(reconciliation.positions), "safe": reconciliation.safe,
+                                    "reasons": reconciliation.reasons}
+            checks["recent_deals_synced"] = new_deals
+            checks["broker"] = f"verified {account.environment}; no orders submitted"
     except Exception as exc:
         checks["broker"] = f"unavailable: {exc}"
     finally:
@@ -97,17 +134,25 @@ def doctor(settings, store):
     return checks
 
 
-def arm_demo(settings, store, args):
+def arm_execution(settings, store, args):
     from app.broker.mt5_client import MT5Broker, verify_account
     from app.data.sessions import SessionSchedule
     from app.execution.reconciliation import reconcile
     from app.risk.circuit_breaker import CircuitBreaker
     from app.service import AccountMutex, permission_fingerprint
     from app.strategies.registry import build
-    settings.require_demo()
+    settings.require_execution_environment()
     settings.require_costs()
-    if args.confirm_account != settings.account_login or not args.confirm_first_order:
-        raise ValueError("Explicit account confirmation and --confirm-first-order authorization required")
+    if args.command == "arm-demo":
+        settings.require_demo()
+        first_order_confirmed = args.confirm_first_order
+    else:
+        if settings.mode != "LIVE":
+            raise ValueError("arm-live requires XAU_MODE=LIVE and a matching real MT5 account")
+        first_order_confirmed = args.confirm_first_live_order
+    required_flag = "--confirm-first-order" if settings.mode == "DEMO" else "--confirm-first-live-order"
+    if args.confirm_account != settings.account_login or not first_order_confirmed:
+        raise ValueError(f"Explicit account confirmation and {required_flag} authorization required")
     if settings.max_spread is None or settings.max_slippage_points is None:
         raise ValueError("Configure execution tolerances before arming")
     # Arming requires a stopped engine: no second process may interfere with MT5 terminal state.
@@ -118,7 +163,7 @@ def arm_demo(settings, store, args):
             account = broker.account()
             verify_account(account, settings)
             if account.currency != "USD":
-                raise ValueError("Initial approved research/execution supports USD demo accounts only")
+                raise ValueError("Validated order sizing currently supports USD broker accounts only")
             strategy = build(settings.active_strategy, store.get(f"strategy_parameters:{settings.active_strategy}", {}))
             approval = store.get(f"approval:{strategy.config_hash}", {})
             symbol = broker.discover()
@@ -148,7 +193,7 @@ def arm_demo(settings, store, args):
             now = utcnow()
             history_start = store.get(f"history_start:{account.key}")
             if not history_start:
-                raise ValueError("Disarmed monitoring must establish trustworthy account history first")
+                raise ValueError("Monitoring must establish trustworthy account history before automatic orders can be authorized")
             deals = broker.history(datetime.fromisoformat(history_start), now)
             risk = EquityBook(store, account.key).observe(account, deals, now)
             reset_at = store.get(f"loss_reset:{account.key}", 0)
@@ -171,18 +216,21 @@ def arm_demo(settings, store, args):
                 raise ValueError("Arming requires an open verified trading session")
             permission = {"active": True, "config_hash": strategy.config_hash,
                           "fingerprint": permission_fingerprint(settings), "authorized_at": utcnow().isoformat(),
-                          "first_demo_order_explicitly_authorized": True}
+                          "environment": account.environment, "first_order_explicitly_authorized": True}
+            authorization_event = f"explicit_{account.environment.lower()}_authorization"
             with store.engine.begin() as conn:
                 store.set(f"armed:{account.key}", permission, conn)
-                store.record("activity", {"event": "explicit_demo_authorization", **permission}, account.key, conn=conn)
+                store.set(f"execution_mode:{account.key}", settings.auto_execution_mode, conn)
+                store.record("activity", {"event": authorization_event, **permission}, account.key, conn=conn)
             return {"armed": True, "strategy": strategy.name, "account": account.key,
-                    "message": "No order submitted by arming; next service start may execute approved signals"}
+                    "environment": account.environment,
+                    "message": "No order submitted by arming; the service may execute future approved signals"}
         finally:
             broker.shutdown()
 
 
 def parser():
-    result = argparse.ArgumentParser(description="XAU/USD research and guarded demo automation")
+    result = argparse.ArgumentParser(description="XAU/USD research, signal monitoring, and guarded MT5 automation")
     sub = result.add_subparsers(dest="command", required=True)
     for name in ("doctor", "status", "demo", "stop", "halt", "reset-halt"):
         sub.add_parser(name)
@@ -200,15 +248,26 @@ def parser():
         research.add_argument("--end")
         research.add_argument("--capital", type=float, default=10000)
         research.add_argument("--spread", type=float)
+        research.add_argument("--commission", type=float)
+        research.add_argument("--slippage", type=float)
+        research.add_argument("--swap-long", type=float)
+        research.add_argument("--swap-short", type=float)
+        research.add_argument("--risk-fraction", type=float)
+        research.add_argument("--risk-limits-json", default="{}")
+        research.add_argument("--parameters-json", default="{}")
+        research.add_argument("--fixed-stop-target", action="store_true",
+                              help="Use stop_atr/reward_risk from --parameters-json instead of searching the grid")
         research.add_argument("--margin", type=float, default=.01)
         research.add_argument("--policy", default="configs/research.json")
-        research.add_argument("--timeframe", choices=["M5", "M15", "M30"], default="M15")
+        research.add_argument("--timeframe", choices=["M1", "M5", "M15", "M30"], default="M15")
         research.add_argument("--trend-timeframe", choices=["H1", "H4"], default="H1")
         if name == "validate-strategy":
             research.add_argument("--consume-holdout", action="store_true")
-    arm = sub.add_parser("arm-demo")
-    arm.add_argument("--confirm-account", type=int, required=True)
-    arm.add_argument("--confirm-first-order", action="store_true")
+    for name, flag in (("arm-demo", "--confirm-first-order"),
+                       ("arm-live", "--confirm-first-live-order")):
+        arm = sub.add_parser(name)
+        arm.add_argument("--confirm-account", type=int, required=True)
+        arm.add_argument(flag, dest="first_order_confirmed", action="store_true")
     coverage = sub.add_parser("confirm-coverage")
     coverage.add_argument("--dataset-hash", required=True)
     coverage.add_argument("--evidence", required=True, help="Path to inspected closure/gap evidence document")
@@ -217,11 +276,17 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    research_job_key = None
+    store = None
     try:
         initial = Settings()
         configure(initial)
         store = Store(initial.database_url)
         store.migrate()
+        if args.command in ("backtest", "compare-strategies", "validate-strategy"):
+            research_job_key = f"research_job:{os.getpid()}"
+            store.set(research_job_key, {"state": "RUNNING", "pid": os.getpid(), "command": args.command,
+                                         "started_at": utcnow().isoformat()})
         settings = configured(store)
         output = None
         if args.command == "doctor":
@@ -229,7 +294,8 @@ def main(argv=None):
         elif args.command == "status":
             key = f"{settings.account_server}:{settings.account_login}"
             output = {"service": service_health(store), "account": store.get("active_account"),
-                      "halt": store.get(f"halt:{key}"), "armed": store.get(f"armed:{key}", {"active": False})}
+                      "halt": store.get(f"halt:{key}"), "armed": store.get(f"armed:{key}", {"active": False}),
+                      "execution_mode": store.get(f"execution_mode:{key}", settings.auto_execution_mode)}
         elif args.command in ("stop", "halt", "reset-halt"):
             if args.command == "halt":
                 from app.risk.circuit_breaker import CircuitBreaker
@@ -239,8 +305,12 @@ def main(argv=None):
         elif args.command == "demo":
             from app.service import DemoService
             DemoService(settings, store).run()
-        elif args.command == "arm-demo":
-            output = arm_demo(settings, store, args)
+        elif args.command in ("arm-demo", "arm-live"):
+            if args.command == "arm-demo":
+                args.confirm_first_order = args.first_order_confirmed
+            else:
+                args.confirm_first_live_order = args.first_order_confirmed
+            output = arm_execution(settings, store, args)
         elif args.command == "download-data":
             from app.broker.mt5_client import MT5Broker
             from app.data.downloader import download
@@ -267,21 +337,50 @@ def main(argv=None):
                        "confirmed_at": utcnow().isoformat()})
             output = {"coverage_confirmed": args.dataset_hash}
         else:
-            frames, spec, cost = research_inputs(settings, store, args)
+            frames, spec, cost, evaluation_start, evaluation_end = research_inputs(settings, store, args)
+            from app.backtesting.engine import BacktestRiskLimits
             from app.backtesting.reports import export_report
             from app.strategies.registry import REGISTRY, build
+            parameters_override = json.loads(args.parameters_json)
+            risk_fraction = args.risk_fraction if args.risk_fraction is not None else settings.risk_per_trade
+            configured_risk = {
+                "daily_loss_limit": settings.daily_loss_limit,
+                "weekly_loss_limit": settings.weekly_loss_limit,
+                "drawdown_limit": settings.drawdown_limit,
+                "consecutive_loss_limit": settings.consecutive_loss_limit,
+                "max_orders_session": settings.max_orders_session,
+                "max_positions": settings.max_positions,
+                "portfolio_risk_limit": settings.portfolio_risk_limit,
+                **json.loads(args.risk_limits_json),
+            }
+            risk_limits = BacktestRiskLimits(**configured_risk)
             if args.command == "backtest":
                 from app.backtesting.engine import run_backtest
                 parameters = {**store.get(f"strategy_parameters:{args.strategy}", {}),
+                              **parameters_override,
                               "entry_timeframe": args.timeframe, "trend_timeframe": args.trend_timeframe}
                 strategy = build(args.strategy, parameters)
-                dataset_hash = digest({tf: f.to_json(date_format="iso") for tf, f in frames.items()})
-                store.set(f"holdout_consumed:{dataset_hash}", {"reason": "Exploratory full-range backtest inspected data"})
                 result = run_backtest(frames, strategy.signals(frames, spec.symbol), spec, cost,
-                                      args.capital, settings.risk_per_trade, timeframe=args.timeframe)
+                                      args.capital, risk_fraction,
+                                      start=evaluation_start, end=evaluation_end,
+                                      timeframe=args.timeframe, risk_limits=risk_limits,
+                                      configuration={"strategy": strategy.name,
+                                          "strategy_parameters": strategy.parameters.model_dump(),
+                                          "strategy_config_hash": strategy.config_hash,
+                                          "risk_fraction": risk_fraction,
+                                          "risk_limits": risk_limits.model_dump(),
+                                          "cost": cost.model_dump(), "capital": args.capital,
+                                          "entry_timeframe": args.timeframe,
+                                          "trend_timeframe": args.trend_timeframe,
+                                          "source": cost.source, "symbol": spec.symbol,
+                                          "symbol_specification": spec.model_dump(mode="json"),
+                                          "requested_start": evaluation_start.isoformat(),
+                                          "requested_end_exclusive": evaluation_end.isoformat()})
                 folder = export_report(result, settings.report_dir, args.strategy)
                 output = {"metrics": result["metrics"], "dataset_hash": result["dataset_hash"],
-                          "report": str(folder.resolve()), "approval": "exploratory run only"}
+                          "report": str(folder.resolve()), "approval": "exploratory run only",
+                          "configuration": result["configuration"], "risk_blocks": result["risk_blocks"],
+                          "trade_count": len(result["trades"])}
                 store.record("backtest_results", output)
             else:
                 from pathlib import Path
@@ -291,11 +390,21 @@ def main(argv=None):
                 policy = ResearchPolicy.model_validate_json(Path(args.policy).read_text(encoding="utf-8"))
                 names = list(REGISTRY) if args.command == "compare-strategies" else [args.strategy]
                 output = research(store, frames, names, spec, cost, settings.report_dir, args.capital,
-                                  getattr(args, "consume_holdout", False), policy, settings.risk_per_trade)
+                                  getattr(args, "consume_holdout", False), policy, risk_fraction,
+                                  evaluation_start=evaluation_start,
+                                  risk_limits=risk_limits,
+                                  base_parameters=parameters_override,
+                                  tune_stop_targets=not args.fixed_stop_target)
         if output is not None:
             print(json.dumps(output, indent=2, default=str, allow_nan=False))
+        if research_job_key:
+            store.set(research_job_key, {"state": "COMPLETED", "pid": os.getpid(), "command": args.command,
+                                         "finished_at": utcnow().isoformat()})
         return 0
     except Exception as exc:
+        if research_job_key and store:
+            store.set(research_job_key, {"state": "FAILED", "pid": os.getpid(), "command": args.command,
+                                         "finished_at": utcnow().isoformat(), "error": str(exc)[:500]})
         # Error strings can contain broker details, but never echo raw secret configuration.
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

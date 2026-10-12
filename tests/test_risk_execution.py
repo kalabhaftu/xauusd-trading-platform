@@ -116,6 +116,28 @@ def test_midperiod_baseline_unverified_and_cash_adjustment(store, broker):
     assert observed["daily_pnl"] == -100
 
 
+def test_risk_snapshot_refreshes_after_position_closes(store, broker):
+    from app.risk.limits import update_risk_snapshot
+
+    account = broker.account().model_copy(update={"balance": 989.68, "equity": 989.68})
+    now = datetime(2026, 10, 12, 14, 44, tzinfo=UTC)
+    store.set(f"equity_book:{account.key}", {
+        "day": "2026-10-12", "week": "2026-10-12", "day_equity": 1000.0, "week_equity": 1000.0,
+        "day_cash": 1000.0, "week_cash": 1000.0, "cash_reference": 1000.0, "high_water": 1000.04,
+        "day_verified": False, "week_verified": False, "last_seen": "2026-10-12T14:14:51+00:00"})
+    deals = [{"ticket": 1, "type": 2, "profit": 1000.0, "time": 1791748457},
+             {"ticket": 2, "type": 0, "position_id": 55, "magic": 0, "entry": 0, "profit": 0,
+              "time": 1791812632},
+             {"ticket": 3, "type": 1, "position_id": 55, "magic": 0, "entry": 1, "profit": -10.32,
+              "time": 1791814627}]
+
+    risk = update_risk_snapshot(store, account, deals, now, broker.settings.magic)
+
+    assert risk["daily_pnl"] == pytest.approx(-10.32)
+    assert risk["weekly_pnl"] == pytest.approx(-10.32)
+    assert risk["last_seen"] == now.isoformat()
+
+
 def test_monitored_utc_week_reset(store, broker):
     book = EquityBook(store, broker.account().key)
     book.observe(broker.account(), [], datetime(2026, 10, 11, 23, 59, 58, tzinfo=UTC))
@@ -210,7 +232,7 @@ def test_arming_refreshes_equity_before_authorization(settings, store, broker, m
     from argparse import Namespace
 
     from app.domain import digest
-    from app.main import arm_demo
+    from app.main import arm_execution
     from app.strategies.registry import build
     strategy = build(settings.active_strategy)
     cost = {"spread_price": settings.max_spread, "slippage_price": settings.slippage_price,
@@ -229,7 +251,8 @@ def test_arming_refreshes_equity_before_authorization(settings, store, broker, m
     broker._account = broker._account.model_copy(update={"equity": 9800})
     monkeypatch.setattr("app.broker.mt5_client.MT5Broker", lambda _: broker)
     with pytest.raises(ValueError, match="daily_loss"):
-        arm_demo(settings, store, Namespace(confirm_account=settings.account_login, confirm_first_order=True))
+        arm_execution(settings, store, Namespace(command="arm-demo", confirm_account=settings.account_login,
+                                                  confirm_first_order=True))
     assert not store.get(f"armed:{broker._account.key}", {}).get("active")
     assert broker.send_count == 0
 

@@ -2,9 +2,11 @@
 
 ## Safe startup and supervision
 
-Configure a dedicated Exness demo account and run doctor first. Start `demo` disarmed to observe broker/account
+Configure a matching MT5 DEMO or LIVE account and run doctor first. Start the monitor with automatic orders off to observe broker/account
 state and establish trustworthy period resets. Verify downloaded history, actual account equity, source, timestamps,
-and broker symbol contract specifications. Keep the MT5 terminal logged in and available during operation.
+and broker symbol contract specifications. The service scans all registered strategies by default; narrow its list on
+the Strategies page if needed. Auto execute is the selected mode, not proof the monitor is running. Only a strategy with
+matching research approval and account authorization can submit orders. Keep the MT5 terminal logged in and available.
 
 Daily reset is midnight UTC; weekly reset is Monday midnight UTC. Loss uses equity changes adjusted for deposits
 and withdrawals, so floating P&L, commissions, and swaps affect limits. Drawdown uses a cash-flow-adjusted equity
@@ -17,7 +19,7 @@ Limits are 0.25% per-trade risk, 0.5% hard maximum, 1% daily loss, 3% weekly los
 Sizing reserves 10% of free margin and budgets adverse execution, commission, and a financing allowance.
 These are modeled risk limits: gaps and broker failures can create losses larger than a stop-based budget.
 
-Halt blocks entries persistently and disarms execution. Protected positions remain open. Bot-owned positions missing
+Halt blocks new entries persistently. Protected positions remain open. Bot-owned positions missing
 SL prompt at most three automatic closure attempts, persisted across restarts. Rejected preflights count toward this
 limit. An uncertain submission blocks further attempts until reconciliation. Remaining exposure is recorded for
 operator recovery; protected positions are retained. A failed or uncertain closure remains audited and
@@ -26,19 +28,20 @@ state, verified baselines, and recovered risk limits. A consecutive-loss halt ad
 explicit reset records an acknowledged loss-streak checkpoint. Reset never rearms entries.
 
 CLI and dashboard start/stop controls are independent of the browser. Closing the dashboard does not terminate
-the service. Stop disarms entries and allows graceful shutdown. For emergency manual intervention use the verified
-MT5 demo terminal; reconcile afterwards. Do not delete intents or halt state to force the bot to trade.
+the service. Stop prevents new entries and allows graceful shutdown. For emergency manual intervention use the verified
+MT5 terminal; reconcile afterwards. Do not delete intents or halt state to force the bot to trade.
 
 ## First broker order
 
-Implementation alone is not authorization to send the first demo order. Review successful read-only checks,
-evidence-backed approval, costs, identity, and risk state. Obtain explicit user authorization. Use `arm-demo` locally,
-then supervise the first service execution. Compare deal, order, volume, actual fill, SL/TP, commissions, and history
-against MT5. Record outcomes in the integration checklist; never fabricate successful checks.
+Implementation alone is not authorization to send the first order. Review successful read-only checks,
+evidence-backed approval, costs, identity, and risk state. Select the intended account environment and obtain explicit
+user authorization. Use `arm-demo` for demo or `arm-live` for a real account, then supervise the first service
+execution. The GUI labels LIVE as real-money and provides an explicit authorization action. Compare deal, order,
+volume, actual fill, SL/TP, commissions, and history against MT5. Record outcomes; never fabricate successful checks.
 
 ## Deployment
 
-Use Windows Task Scheduler for unattended demo monitoring with the full `.venv\Scripts\python.exe` path,
+Use Windows Task Scheduler for unattended monitoring with the full `.venv\Scripts\python.exe` path,
 arguments `-m app.main demo`, and the project as “Start in”. Configure one task instance and a restart delay.
 MT5 generally needs a usable Windows user session; verify that chosen Task Scheduler/session settings actually
 allow terminal connectivity. A machine sleep, reboot, or logout can interrupt the terminal and engine. Never bypass
@@ -54,11 +57,11 @@ not performed. Rotating JSON logs cap routine log files. SQLite candle history g
 ## Troubleshooting
 
 - **MT5 missing:** install the official Windows terminal, specify its executable path, and install the Windows MT5 wheel.
-- **Identity/permission mismatch:** correct the configured demo login/server; verify actual account trade mode and external API permissions. A server name alone does not prove demo status.
+- **Identity/permission mismatch:** correct the configured login/server and environment; verify actual account trade mode and external API permissions. A server name alone does not prove demo or live status.
 - **No history:** increase “Max bars in chart”, load broker charts, retry download, and inspect coverage. Broker limitations cannot be repaired with synthetic prices.
 - **No strategy approval:** inspect sample size, out-of-sample metrics, costs, gaps, folds, and concentration. Failure is a valid result.
 - **Risk baselines missing:** keep monitoring through the UTC day/week boundary; startup balance is not prior midnight equity.
 - **Session metadata stale:** re-run the read-only exporter and verify server offset. Broker holiday changes require updated evidence.
 - **Unknown order result:** inspect MT5 positions and history. Preserve intent records and wait for reconciliation; never blind-resend.
 - **DNS/install errors:** verify DNS and HTTPS access to pypi.org/files.pythonhosted.org. Do not disable TLS checks. Dependency resolution here needed an IPv4 workaround for unreliable local DNS.
-- **Dashboard empty:** connect the disarmed service or download data. Empty indicators are honest unavailable-state reporting.
+- **Dashboard empty:** start the monitor or download data. Empty indicators are honest unavailable-state reporting.

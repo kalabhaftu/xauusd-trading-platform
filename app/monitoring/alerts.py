@@ -19,6 +19,12 @@ class AlertWorker:
         if self.thread.is_alive():
             self.thread.join(timeout=1)
 
+    @staticmethod
+    def should_send(preferences: dict, event: str) -> bool:
+        selected_events = preferences.get("events")
+        return bool(preferences.get("enabled", True)) and (
+            selected_events is None or event in selected_events)
+
     def run(self) -> None:
         while not self.stop_event.wait(5):
             for record in reversed(self.store.list("notifications", 100)):
@@ -26,7 +32,14 @@ class AlertWorker:
                 delivery = self.store.get(key, {"attempts": 0})
                 if delivery.get("delivered") or delivery["attempts"] >= 5:
                     continue
-                text = f"XAU demo • {record['payload'].get('event', 'event')}\n{record['payload'].get('message', '')}"
+                preferences = self.store.get("telegram_preferences", {})
+                event = record["payload"].get("event", "event")
+                if not self.should_send(preferences, event):
+                    self.store.set(key, {"attempts": delivery["attempts"], "delivered": True,
+                                         "suppressed": True})
+                    continue
+                environment = record["payload"].get("_meta", {}).get("environment", "XAU")
+                text = f"XAU {environment} • {event}\n{record['payload'].get('message', '')}"
                 for value in (self.settings.account_password, self.settings.telegram_token,
                               self.settings.telegram_chat_id):
                     if value:

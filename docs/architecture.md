@@ -6,7 +6,7 @@ foreign keys, FULL synchronization, short transactions, and separate SQLAlchemy 
 
 Strategies never receive broker execution methods. They generate typed signals from completed candles. The
 execution engine normalizes protective prices, reconciles account state, obtains a centralized risk decision,
-persists intent, performs broker preflight, rechecks permission/quote/risk, and submits through the demo-only adapter.
+persists intent, performs broker preflight, rechecks permission/quote/risk, and submits through the verified MT5 account.
 
 Order states include PREPARED, SUBMITTING, FILLED, PARTIAL, REJECTED, ACCEPTED, UNKNOWN, EXPIRED, and resolved
 partial/closure states. A PREPARED intent proves submission had not begun and is expired on recovery. SUBMITTING
@@ -25,5 +25,7 @@ An outbox notification thread sends optional Telegram messages independently, wi
 delivery is persisted; notification failures cannot bypass risk controls or delay broker submission. Secrets are
 excluded from dashboard settings, audit payloads, and notification text, with structured-log redaction as a second layer.
 
-LIVE is recognized only to produce a clear unsupported-mode error. A future live implementation requires a separate
-credential set, identity, explicit enable flag, fresh authorization, additional integration tests, and deployment review.
+DEMO and LIVE use the same broker adapter, but the configured environment must match the terminal account type exactly.
+LIVE appears as real-money trading in the GUI and uses the same explicit, account-specific authorization and safety
+checks. Environment/account changes stop the engine and clear authorization. The application does not silently switch
+the configured environment or arm entries.

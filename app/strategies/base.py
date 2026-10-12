@@ -10,7 +10,7 @@ from app.domain import Direction, Model, Signal, digest
 
 
 class Parameters(Model):
-    entry_timeframe: Literal["M5", "M15", "M30"] = "M15"
+    entry_timeframe: Literal["M1", "M5", "M15", "M30"] = "M15"
     trend_timeframe: Literal["H1", "H4"] = "H1"
     atr_period: int = Field(default=14, ge=2, le=200)
     stop_atr: float = Field(default=1.5, gt=0, le=10)

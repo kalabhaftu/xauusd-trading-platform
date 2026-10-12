@@ -2,8 +2,23 @@ import pytest
 
 from app.backtesting.engine import CostProfile
 from app.backtesting.reports import export_report
-from app.backtesting.research import research
+from app.backtesting.research import apply_stop_target_parameters, parameter_grid, research
 from app.domain import digest
+from app.strategies.registry import build
+
+
+@pytest.mark.parametrize("name", ["trend_pullback", "session_breakout", "mean_reversion"])
+def test_parameter_grid_signal_reuse_matches_direct_strategy_signals(name, synthetic_frames):
+    base = {"entry_timeframe": "M15", "trend_timeframe": "H1"}
+    template_strategy = build(name, {**base, "stop_atr": 1.2})
+    templates = template_strategy.signals(synthetic_frames, "XAUUSD")
+
+    for variation in parameter_grid():
+        candidate = build(name, {**base, **variation})
+        reused = apply_stop_target_parameters(templates, candidate)
+        direct = candidate.signals(synthetic_frames, "XAUUSD")
+        assert [signal.model_dump(mode="json") for signal in reused] == [
+            signal.model_dump(mode="json") for signal in direct]
 
 
 def test_reports_are_reproducible_and_not_approval(broker, tmp_path):
@@ -32,7 +47,7 @@ def test_complete_short_sample_comparison_reports_no_approval(store, synthetic_f
     result = research(store, frames, ["trend_pullback", "session_breakout", "mean_reversion"],
                       broker.spec("XAUUSD"), cost, tmp_path)
     assert len(result["candidates"]) == 3
-    assert result["status"] == "NO STRATEGY APPROVED FOR DEMO AUTOMATION"
+    assert result["status"] == "NO STRATEGY APPROVED FOR AUTOMATION"
     assert not result["approved"]
     assert store.list("backtest_results")
     from pathlib import Path

@@ -21,15 +21,15 @@ class BrokerError(RuntimeError):
     pass
 
 
-def verify_account(account: Account, settings: Settings) -> None:
-    settings.require_demo()
+def verify_account(account: Account, settings: Settings, *, require_trading: bool = True) -> None:
+    settings.require_execution_environment()
     if account.login != settings.account_login or account.server != settings.account_server:
         raise BrokerError("Configured account identity does not match the terminal")
     if settings.expected_company.lower() not in account.company.lower():
         raise BrokerError("Unexpected broker company")
-    if account.environment != "DEMO":
-        raise BrokerError("Refusing non-demo account")
-    if not account.trade_allowed or not account.expert_allowed:
+    if account.environment != settings.mode:
+        raise BrokerError(f"Configured {settings.mode} mode does not match connected account environment")
+    if require_trading and (not account.trade_allowed or not account.expert_allowed):
         raise BrokerError("Account trading or external API permission is disabled")
 
 
@@ -39,7 +39,7 @@ class MT5Broker:
         self.mt5: Any = None  # Official compiled extension exposes namedtuples and untyped constants.
 
     def connect(self) -> None:
-        self.settings.require_demo()
+        self.settings.require_execution_environment()
         self.mt5 = importlib.import_module("MetaTrader5")
         kwargs = {"login": self.settings.account_login, "server": self.settings.account_server,
                   "timeout": 10000}
@@ -48,7 +48,9 @@ class MT5Broker:
         if not self.mt5.initialize(path=self.settings.mt5_path, **kwargs):
             raise BrokerError(f"MT5 initialization failed ({self.mt5.last_error()[0]})")
         try:
-            verify_account(self.account(), self.settings)
+            # Initialization is also used by doctor and historical research. Those paths only
+            # read account/market data and must remain available while terminal trading is off.
+            verify_account(self.account(), self.settings, require_trading=False)
         except Exception:
             self.shutdown()
             raise
@@ -74,7 +76,9 @@ class MT5Broker:
                        balance=info.balance, equity=info.equity, margin=info.margin,
                        free_margin=info.margin_free, trade_allowed=bool(info.trade_allowed),
                        expert_allowed=bool(info.trade_expert and terminal.trade_allowed
-                                           and not terminal.tradeapi_disabled))
+                                           and not terminal.tradeapi_disabled),
+                       terminal_trade_allowed=bool(terminal.trade_allowed),
+                       external_api_allowed=not bool(terminal.tradeapi_disabled))
 
     def discover(self) -> str:
         symbols = self._required(self.mt5.symbols_get(), "symbols")

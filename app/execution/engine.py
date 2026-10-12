@@ -36,7 +36,7 @@ class ExecutionEngine:
                                       signal.stop_loss, signal.take_profit, comment)
         payload = {"signal": signal.model_dump(mode="json"), "decision": decision.model_dump(mode="json"),
                    "comment": comment, "request": request}
-        payload["_meta"] = AuditMetadata(environment="DEMO", source=account.server,
+        payload["_meta"] = AuditMetadata(environment=account.environment, source=account.server,
                                         configuration_hash=signal.config_hash,
                                         correlation_id=key).model_dump(mode="json")
         with self.store.engine.begin() as conn:
@@ -132,7 +132,7 @@ class ExecutionEngine:
                                       "xau:close:" + str(position.ticket), position.ticket)
         payload = {"request": request, "comment": request["comment"], "decision": {"volume": position.volume},
                    "emergency": emergency, "position": position.model_dump(mode="json")}
-        payload["_meta"] = AuditMetadata(environment="DEMO", source=account.server,
+        payload["_meta"] = AuditMetadata(environment=account.environment, source=account.server,
                                         correlation_id=key).model_dump(mode="json")
         ok, reason = self.broker.check(request)
         if not ok:

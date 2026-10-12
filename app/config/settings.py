@@ -50,14 +50,27 @@ class Settings(BaseSettings):
         if self.risk_per_trade > self.hard_risk_max:
             raise ValueError("risk_per_trade exceeds hard_risk_max")
         if self.entries_armed:
-            raise ValueError("Entries cannot be armed by environment; use the audited arm-demo command")
+            raise ValueError("Entries cannot be armed by environment; use the audited account-specific arm command")
         return self
+
+    @property
+    def auto_execution_mode(self) -> str:
+        if self.mode == "DEMO":
+            return "AUTO_DEMO"
+        if self.mode == "LIVE":
+            return "AUTO_LIVE"
+        raise ValueError("BACKTEST mode cannot execute broker orders")
+
+    def require_execution_environment(self) -> None:
+        if self.mode not in ("DEMO", "LIVE"):
+            raise ValueError("Broker execution requires explicitly configured DEMO or LIVE mode")
+        if not self.account_login or not self.account_server or not self.mt5_path:
+            raise ValueError("Explicit MT5 path, expected login, and server are required")
 
     def require_demo(self) -> None:
         if self.mode != "DEMO":
-            raise ValueError("Broker execution requires DEMO; LIVE execution is unavailable")
-        if not self.account_login or not self.account_server or not self.mt5_path:
-            raise ValueError("Explicit MT5 path, expected login, and server are required")
+            raise ValueError("This operation requires DEMO mode")
+        self.require_execution_environment()
 
     def require_costs(self) -> None:
         if any(value is None for value in (

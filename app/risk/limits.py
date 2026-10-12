@@ -72,3 +72,15 @@ def consecutive_losses(deals: list[dict], magic: int) -> int:
         else:
             break
     return losses
+
+
+def update_risk_snapshot(store, account: Account, deals: list[dict], now: datetime, magic: int) -> dict:
+    """Recompute displayed period P&L and loss streak from one verified MT5 snapshot."""
+    risk = EquityBook(store, account.key).observe(account, deals, now)
+    reset_at = store.get(f"loss_reset:{account.key}", 0)
+    recent = [deal for deal in deals if deal.get("time", 0) > reset_at]
+    risk["consecutive_losses"] = consecutive_losses(recent, magic)
+    risk["last_exit_time"] = max((deal.get("time", 0) for deal in recent
+                                  if deal.get("entry") in (1, 2, 3)), default=0)
+    store.set(f"risk:{account.key}", risk)
+    return risk

@@ -28,7 +28,9 @@ def owned_positions(broker, store, settings, positions) -> set[int]:
 
 def reconcile(broker, store, settings, exclude_prepared_key=None) -> Reconciliation:
     account = broker.account()
-    verify_account(account, settings)
+    # Reconciliation is read-only and must still run while order permissions are off.
+    # Order placement paths verify trading permission immediately before execution.
+    verify_account(account, settings, require_trading=False)
     positions, orders = broker.positions(), broker.orders()
     reasons = []
     ownership = owned_positions(broker, store, settings, positions)
@@ -38,7 +40,7 @@ def reconcile(broker, store, settings, exclude_prepared_key=None) -> Reconciliat
     if expected_symbol and any(p.symbol != expected_symbol for p in positions):
         reasons.append("Unexpected symbol exposure")
     if any(p.magic != settings.magic for p in positions) or any(o.get("magic") != settings.magic for o in orders):
-        reasons.append("Unexpected account exposure on dedicated demo account")
+        reasons.append("Unexpected account exposure outside the configured bot scope")
     if orders:
         reasons.append("Pending broker orders block market entries")
     if any(p.stop_loss <= 0 for p in positions):

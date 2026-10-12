@@ -20,18 +20,18 @@ class RiskManager:
 
     def _evaluate(self, signal, now, book, reconciliation, schedule):
         settings = self.settings
-        settings.require_demo()
+        settings.require_execution_environment()
         settings.require_costs()
         account = self.broker.account()
         verify_account(account, settings)
         if account.currency != "USD":
-            raise ValueError("Initial approved research/execution supports USD demo accounts only")
+            raise ValueError("Validated order sizing currently supports USD broker accounts only")
         breaker = CircuitBreaker(self.store, account.key)
         if breaker.current()["active"]:
             raise ValueError("Persistent circuit breaker active")
         armed = self.store.get(f"armed:{account.key}", {"active": False})
         if not armed.get("active") or armed.get("config_hash") != signal.config_hash:
-            raise ValueError("Demo entries disarmed or strategy configuration changed")
+            raise ValueError("Automatic order permission is off or the strategy configuration changed")
         from app.service import permission_fingerprint
         if armed.get("fingerprint") != permission_fingerprint(settings):
             raise ValueError("Execution settings changed since explicit authorization")
@@ -110,5 +110,5 @@ class RiskManager:
         count = self.store.get(f"session_orders:{account.key}:{signal.strategy}:{session}", 0)
         if count >= settings.max_orders_session:
             raise ValueError("Session entry limit reached")
-        return RiskDecision(approved=True, reason="All demo risk checks passed", volume=volume,
+        return RiskDecision(approved=True, reason="All broker risk checks passed", volume=volume,
                             entry=entry, risk_amount=risk, margin=margin)

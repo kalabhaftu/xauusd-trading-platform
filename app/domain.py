@@ -30,7 +30,7 @@ class Direction(StrEnum):
 
 
 class AuditMetadata(Model):
-    environment: Literal["DEMO", "BACKTEST", "UNKNOWN"]
+    environment: Literal["DEMO", "LIVE", "BACKTEST", "UNKNOWN"]
     source: str
     timestamp: datetime = Field(default_factory=utcnow)
     configuration_version: str = "1"
@@ -50,6 +50,8 @@ class Account(Model):
     free_margin: float
     trade_allowed: bool
     expert_allowed: bool
+    terminal_trade_allowed: bool = True
+    external_api_allowed: bool = True
     timestamp: datetime = Field(default_factory=utcnow)
 
     @property
@@ -181,7 +183,7 @@ class Candle(Model):
 class OrderIntent(Model):
     key: str
     account: str
-    environment: Literal["DEMO"] = "DEMO"
+    environment: Literal["DEMO", "LIVE"] = "DEMO"
     state: str
     timestamp: datetime
     signal: Signal

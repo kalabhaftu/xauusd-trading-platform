@@ -17,4 +17,9 @@ logs/
 *.egg-info/
 build/
 dist/
+.build/
+*.spec
+AurumLauncher.exe
 *.log
+
+.codex-worktrees/

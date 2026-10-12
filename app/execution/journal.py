@@ -2,18 +2,21 @@ from datetime import UTC, datetime
 from typing import Any
 
 
-def trade_journal(store, account: str, magic: int) -> list[dict]:
+def trade_journal(store, account: str, magic: int | None, owner_magic: int | None = None) -> list[dict]:
     deals = [r["payload"] for r in store.list("broker_deals", 100000, account)]
     intentions = [r["payload"] for r in store.list("order_intents", 100000, account)]
     signals_by_comment = {i.get("comment"): i.get("signal", {}) for i in intentions if i.get("signal")}
     signals_by_order = {i.get("result", {}).get("order"): i["signal"] for i in intentions
                         if i.get("signal") and i.get("result", {}).get("order")}
+    owner_magic = magic if owner_magic is None else owner_magic
     groups: dict[int, list[dict[str, Any]]] = {}
     for deal in deals:
-        if deal.get("magic") == magic and deal.get("position_id"):
+        if deal.get("position_id"):
             groups.setdefault(deal["position_id"], []).append(deal)
     rows = []
     for pid, lifecycle in groups.items():
+        if magic is not None and not any(d.get("magic") == magic for d in lifecycle):
+            continue
         entries = [d for d in lifecycle if d.get("entry") in (0, 2)]
         exits = [d for d in lifecycle if d.get("entry") in (1, 3)]
         if not entries:
@@ -27,6 +30,8 @@ def trade_journal(store, account: str, magic: int) -> list[dict]:
         net = sum(sum(float(d.get(k, 0)) for k in ("profit", "commission", "swap", "fee")) for d in lifecycle)
         row = {
             "position": pid, "symbol": first.get("symbol"), "strategy": metadata.get("strategy", "unattributed"),
+            "owner": "Bot" if any(d.get("magic") == owner_magic for d in entries) and owner_magic is not None
+            else "Manual / unrecognized",
             "direction": "LONG" if first.get("type") == 0 else "SHORT", "volume_lots": entered,
             "entry_price": sum(d["price"] * d["volume"] for d in entries) / entered,
             "exit_price": sum(d["price"] * d["volume"] for d in exits) / exited if exited else None,
@@ -38,7 +43,7 @@ def trade_journal(store, account: str, magic: int) -> list[dict]:
             "exit_time": datetime.fromtimestamp(final_time, UTC).isoformat() if final_time and complete else None,
             "holding_seconds": final_time - first["time"] if final_time and complete else None,
             "status": "CLOSED" if complete else "PARTIALLY_CLOSED" if exits else "OPEN",
-            "rationale": metadata.get("rationale"), "source": "broker demo deals",
+            "rationale": metadata.get("rationale"), "source": "broker deals",
         }
         rows.append(row)
     return sorted(rows, key=lambda r: r["entry_time"], reverse=True)

@@ -24,8 +24,16 @@ def export_report(result: dict, report_dir: Path, label: str) -> Path:
     figure.add_trace(go.Scatter(x=equity.index, y=drawdown, name="Drawdown %", fill="tozeroy"), row=2, col=1)
     figure.update_layout(template="plotly_dark", title="Historical simulation • no broker execution")
     chart = figure.to_html(full_html=False, include_plotlyjs=True)
-    text = f"<h1>{html.escape(label)}</h1><p>Historical simulation. Execution and financing assumptions are explicit.</p>"
-    text += chart + "<pre>" + html.escape(json.dumps(summary, indent=2, default=str)) + "</pre>"
+    metrics = pd.DataFrame([{"Metric": key.replace("_", " ").title(),
+                             "Result": str(value) if not isinstance(value, (dict, list)) else str(value)}
+                            for key, value in result["metrics"].items()])
+    configuration = pd.json_normalize(result.get("configuration", {}), sep=" / ").melt(
+        var_name="Setting", value_name="Value") if result.get("configuration") else pd.DataFrame()
+    text = f"<h1>{html.escape(label)}</h1><p>Historical simulation. No broker orders were submitted.</p>"
+    text += "<h2>Performance</h2>" + metrics.to_html(index=False, escape=True)
+    if not configuration.empty:
+        text += "<h2>Run settings</h2>" + configuration.to_html(index=False, escape=True)
+    text += "<h2>Equity and drawdown</h2>" + chart
     (folder / "report.html").write_text("<!doctype html><meta charset='utf-8'>" + text, encoding="utf-8")
     return folder
 
@@ -42,7 +50,11 @@ def export_research_report(result: dict, report_dir: Path) -> Path:
     pd.DataFrame(sensitivity).to_csv(folder / "sensitivity.csv", index=False)
     title = "Historical strategy research • " + result["status"]
     text = "<!doctype html><meta charset='utf-8'><h1>" + html.escape(title) + "</h1>"
-    text += pd.DataFrame(comparisons).to_html(index=False, escape=True)
-    text += "<pre>" + html.escape(json.dumps(result, indent=2, default=str)) + "</pre>"
+    text += "<h2>Strategy comparison</h2>" + pd.DataFrame(comparisons).to_html(index=False, escape=True)
+    if result.get("baselines"):
+        text += "<h2>Reference strategies</h2>" + pd.DataFrame(result["baselines"]).T.to_html(escape=True)
+    text += "<h2>Evaluation period</h2>" + pd.DataFrame({"Boundary": ["Start", "Training ends",
+        "Validation ends", "End"], "UTC": result.get("partitions", [])}).to_html(index=False, escape=True)
+    text += "<p>Detailed per-strategy trade ledgers and sensitivity results are available as CSV downloads.</p>"
     (folder / "report.html").write_text(text, encoding="utf-8")
     return folder

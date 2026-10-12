@@ -12,14 +12,19 @@ from app.monitoring.logger import RedactingFormatter
 from app.risk.circuit_breaker import CircuitBreaker
 
 
-def test_settings_disarmed_and_live_rejected():
+def test_settings_default_auto_mode_stays_disarmed_and_live_is_configurable():
     settings = Settings(_env_file=None)
     assert settings.mode == "DEMO" and not settings.entries_armed
+    assert settings.auto_execution_mode == "AUTO_DEMO"
     assert settings.max_spread == .5 and settings.max_slippage_points == 20 and settings.slippage_price == .2
     with pytest.raises(ValueError, match="commission"):
         settings.require_costs()
-    with pytest.raises(ValueError):
-        Settings(_env_file=None, mode="LIVE").require_demo()
+    live = Settings(_env_file=None, mode="LIVE", account_login=123, account_server="Exness-Real",
+                    mt5_path="C:/Program Files/MetaTrader 5/terminal64.exe")
+    live.require_execution_environment()
+    assert live.auto_execution_mode == "AUTO_LIVE"
+    with pytest.raises(ValueError, match="requires DEMO"):
+        live.require_demo()
     with pytest.raises(ValidationError):
         Settings(_env_file=None, entries_armed=True)
     with pytest.raises(ValidationError):
