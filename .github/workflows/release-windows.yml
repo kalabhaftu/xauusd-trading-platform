@@ -1,0 +1,51 @@
+name: Windows release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install -r requirements.lock
+          if ($LASTEXITCODE -ne 0) { throw 'Locked dependency installation failed.' }
+          .\.venv\Scripts\python.exe -m pip install --no-build-isolation --no-deps -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Project installation failed.' }
+
+      - name: Build and self-test the standalone launcher
+        shell: pwsh
+        run: .\scripts\build-launcher.ps1
+
+      - name: Attach the Windows executable to this release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release upload "$env:RELEASE_TAG" "dist/AurumLauncher.exe" --repo "$env:REPOSITORY" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Uploading the Windows executable failed.' }
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/AurumLauncher.exe").Hash
+          "Windows EXE SHA-256: ``$hash``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
