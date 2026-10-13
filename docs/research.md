@@ -18,8 +18,8 @@ Each Backtesting.py integer unit is a broker volume step; economic OHLC prices a
 volume step. This preserves CFD P&L and permits fractional lots without interpreting lot counts as ounces. Quantities
 are rounded down and recalculated at actual modeled entry prices. Entry signals execute at the next bar open.
 
-Historical replay applies the same default portfolio guardrails used by demo settings: 1% daily loss from UTC day
-equity, 3% weekly loss from Monday 00:00 UTC, 10% peak drawdown, three consecutive net losses, and three requested
+Historical replay applies the same default portfolio guardrails used by demo settings: 5% daily loss from UTC day
+equity, 3% weekly loss from Monday 00:00 UTC, 10% peak drawdown, five consecutive net losses, and three requested
 entries per named session (or UTC day for continuous strategies). One simultaneous position is the default; historical
 simulations allow up to ten when the combined open-risk cap is respected. The demo default remains one. The lab
 allows these thresholds, per-trade risk, starting capital, cost assumptions, strategy parameters, and timeframes to

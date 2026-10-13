@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     portfolio_risk_limit: float = Field(default=1.0, gt=0, le=1)
     max_positions: int = Field(default=1, ge=1)
     max_orders_session: int = Field(default=3, ge=1)
-    consecutive_loss_limit: int = Field(default=3, ge=1)
+    consecutive_loss_limit: int = Field(default=5, ge=1)
     loss_cooldown_minutes: int = Field(default=60, ge=1)
     emergency_close_attempts: int = Field(default=3, ge=1, le=10)
     max_spread: float | None = Field(default=0.50, gt=0)

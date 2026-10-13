@@ -38,7 +38,7 @@ class BacktestRiskLimits(Model):
     daily_loss_limit: float = Field(default=0.05, gt=0, le=1)
     weekly_loss_limit: float = Field(default=0.03, gt=0, le=1)
     drawdown_limit: float = Field(default=0.10, gt=0, le=1)
-    consecutive_loss_limit: int = Field(default=3, ge=1)
+    consecutive_loss_limit: int = Field(default=5, ge=1)
     max_orders_session: int = Field(default=3, ge=1)
     max_positions: int = Field(default=1, ge=1)
     portfolio_risk_limit: float = Field(default=1.0, gt=0, le=1)

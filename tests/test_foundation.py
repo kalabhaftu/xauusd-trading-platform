@@ -21,6 +21,7 @@ def test_settings_default_auto_mode_stays_disarmed_and_live_is_configurable():
     assert settings.auto_execution_mode == "AUTO_DEMO"
     assert settings.cost_mode == "AUTO"
     assert settings.daily_loss_limit == .05
+    assert settings.consecutive_loss_limit == 5
     assert settings.max_spread == .5 and settings.max_slippage_points == 20 and settings.slippage_price == .2
     settings.require_costs()
     live = Settings(_env_file=None, mode="LIVE", account_login=123, account_server="Exness-Real",
@@ -44,6 +45,7 @@ def test_research_defaults_are_one_minute_with_independent_capital():
     assert args.capital == 1000
     assert Parameters().entry_timeframe == "M1"
     assert BacktestRiskLimits().daily_loss_limit == .05
+    assert BacktestRiskLimits().consecutive_loss_limit == 5
 
 
 def test_legacy_half_percent_caps_are_migrated_to_user_configurable(store, monkeypatch):
