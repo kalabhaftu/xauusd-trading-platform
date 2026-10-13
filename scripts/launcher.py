@@ -40,17 +40,45 @@ def configure_packaged_paths() -> tuple[Path, Path]:
     if is_packaged():
         for folder in (data, data / "data", data / "reports", data / "logs", data / "tools"):
             folder.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("AURUM_SETTINGS_FILE", str(data / "settings.env"))
+        # A packaged copy is a separate user installation. Do not inherit the
+        # developer's environment, project .env, credentials, or database paths.
+        for name in tuple(os.environ):
+            if name.upper().startswith(("XAU_", "STREAMLIT_")):
+                os.environ.pop(name, None)
+        os.environ["AURUM_SETTINGS_FILE"] = str(data / "settings.env")
         database = (data / "data" / "platform.db").as_posix()
-        os.environ.setdefault("XAU_DATABASE_URL", f"sqlite:///{database}")
-        os.environ.setdefault("XAU_REPORT_DIR", str(data / "reports"))
-        os.environ.setdefault("XAU_SESSION_FILE", str(data / "data" / "xau_sessions.json"))
+        os.environ["XAU_DATABASE_URL"] = f"sqlite:///{database}"
+        os.environ["XAU_REPORT_DIR"] = str(data / "reports")
+        os.environ["XAU_SESSION_FILE"] = str(data / "data" / "xau_sessions.json")
         for name in ("ExportSessions.mq5", "SessionExporterEA.mq5"):
             source = root / "scripts" / name
             destination = data / "tools" / name
             if source.is_file() and not destination.exists():
                 shutil.copy2(source, destination)
     return root, data
+
+
+def dashboard_port(packaged: bool) -> int:
+    """Keep the standalone user's dashboard separate from the developer server."""
+    return 8502 if packaged else 8501
+
+
+def dashboard_arguments(root: Path, packaged: bool) -> list[str]:
+    """Build production-mode Streamlit args for frozen bundles and source runs."""
+    return [
+        "streamlit", "run", str(root / "app" / "dashboard" / "home.py"),
+        "--global.developmentMode", "false",
+        "--server.address", "127.0.0.1",
+        "--server.port", str(dashboard_port(packaged)),
+        "--server.headless", "true",
+        "--browser.gatherUsageStats", "false",
+    ]
+
+
+def has_saved_account(snapshot: dict | None) -> bool:
+    """Return whether Getting Started has saved enough account details to run a check."""
+    account = (snapshot or {}).get("configured_account") or {}
+    return bool(account.get("login") and str(account.get("server", "")).strip())
 
 
 def check_project(root: Path | None) -> bool:
@@ -82,10 +110,7 @@ def _worker(arguments: list[str]) -> int:
     if arguments == ["dashboard"]:
         from streamlit.web import cli
 
-        dashboard = root / "app" / "dashboard" / "home.py"
-        sys.argv = ["streamlit", "run", str(dashboard), "--server.address", "127.0.0.1",
-                    "--server.port", "8501", "--server.headless", "true",
-                    "--browser.gatherUsageStats", "false"]
+        sys.argv = dashboard_arguments(root, is_packaged())
         try:
             cli.main()
         except SystemExit as error:
@@ -134,7 +159,7 @@ def main() -> int:
 
     packaged = is_packaged()
     working_dir = data if packaged else root
-    url = "http://127.0.0.1:8501"
+    url = f"http://127.0.0.1:{dashboard_port(packaged)}"
     logs = data / "logs"
     logs.mkdir(parents=True, exist_ok=True)
 
@@ -145,7 +170,7 @@ def main() -> int:
         if packaged:
             return _command(root, data, ["dashboard"])
         return _command(root, data, ["-m", "streamlit", "run", "app/dashboard/home.py",
-                                     "--server.address", "127.0.0.1", "--server.port", "8501",
+                                     "--server.address", "127.0.0.1", "--server.port", str(dashboard_port(False)),
                                      "--browser.gatherUsageStats", "false"])
 
     window = Tk()
@@ -276,6 +301,17 @@ def main() -> int:
             messagebox.showerror("Stop failed", "Could not request a graceful stop.")
 
     def doctor() -> None:
+        snapshot = status_snapshot()
+        if not has_saved_account(snapshot):
+            status_text.set("Finish the one-time MT5 setup in the dashboard first")
+            messagebox.showinfo(
+                "Finish setup first",
+                "Aurum has not saved an MT5 account yet. The dashboard is opening to Getting Started. "
+                "Enter the account number, exact server name, and gold symbol there, then save and check "
+                "the connection. This does not start monitoring or place orders.",
+            )
+            open_dashboard()
+            return
         status_text.set("Checking the MT5 connection…")
 
         def work():
@@ -336,6 +372,9 @@ def main() -> int:
               style="Sub.TLabel", wraplength=590).pack(anchor="w", pady=(9, 0))
 
     refresh_status()
+    # A double-click should take a new user straight to the setup wizard.
+    # The dashboard selects Getting Started until the user saves their setup.
+    window.after(250, open_dashboard)
     window.mainloop()
     return 0
 

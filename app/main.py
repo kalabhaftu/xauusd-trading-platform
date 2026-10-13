@@ -314,6 +314,10 @@ def main(argv=None):
         elif args.command == "status":
             key = f"{settings.account_server}:{settings.account_login}"
             output = {"service": service_health(store), "account": store.get("active_account"),
+                      "configured_account": ({"login": settings.account_login,
+                                              "server": settings.account_server,
+                                              "environment": settings.mode}
+                                             if settings.account_login and settings.account_server else None),
                       "halt": store.get(f"halt:{key}"), "armed": store.get(f"armed:{key}", {"active": False}),
                       "execution_mode": store.get(f"execution_mode:{key}", settings.auto_execution_mode)}
         elif args.command in ("stop", "halt", "reset-halt"):

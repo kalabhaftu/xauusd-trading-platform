@@ -10,10 +10,12 @@ The mock broker and synthetic datasets are exclusively software test fixtures; t
 
 ## Windows users
 
-Get `AurumLauncher.exe` from the project's release and double-click it. You do not need the source code, Python,
-`.env`, or a virtual environment. You do need the MetaTrader 5 desktop terminal and your own broker login. Follow the
-short [getting-started guide](docs/getting-started.md) to connect the account, run a historical simulation, and start
-the market monitor. The executable keeps local settings, reports, and history in `%LOCALAPPDATA%\Aurum`.
+Get `AurumLauncher.exe` from the project's release and double-click it. The dashboard opens in your browser, with
+first-time account setup ready to complete. You do not need the source code, Python, `.env`, or a virtual
+environment. You do need the MetaTrader 5 desktop terminal and your own broker login. Follow the short
+[getting-started guide](docs/getting-started.md) to connect the account, run a historical simulation, and start the
+market monitor. The executable keeps local settings, reports, and history in `%LOCALAPPDATA%\Aurum`, separately
+from any developer dashboard.
 
 The EXE is built from this repository with `scripts/build-launcher.ps1`; the build includes the dashboard, Python
 runtime, strategies, database migrations, and MT5 connector. Users should download a release build, not run the build
