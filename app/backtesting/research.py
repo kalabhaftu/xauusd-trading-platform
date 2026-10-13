@@ -16,7 +16,7 @@ from app.strategies.registry import build
 logger = logging.getLogger(__name__)
 
 
-def partitions(frame, timeframe="M15", evaluation_start=None):
+def partitions(frame, timeframe="M1", evaluation_start=None):
     if len(frame) < 1000:
         raise ValueError("Insufficient history for chronological research partitions")
     end = frame.index[-1] + pd.Timedelta(minutes=TIMEFRAMES[timeframe])
@@ -76,7 +76,7 @@ def optimize(frames, name, spec, cost, capital, start, end, base=None, policy=No
     return winner, results
 
 
-def baseline_signals(frames, symbol, name, start=None, timeframe="M15"):
+def baseline_signals(frames, symbol, name, start=None, timeframe="M1"):
     frame = frames[timeframe]
     minutes = TIMEFRAMES[timeframe]
     volatility = atr(frame)

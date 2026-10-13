@@ -8,7 +8,7 @@ from app.backtesting.research import partitions, walk_forward_windows
 from app.domain import Direction, Signal
 
 
-def fixture_run(broker, direction=Direction.LONG, ambiguous=True, gap=False, cost=None):
+def fixture_run(broker, direction=Direction.LONG, ambiguous=True, gap=False, cost=None, risk_fraction=.0025):
     index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
     frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000., "tick_volume": 1}, index=index)
     frame.loc[index[3], ["high", "low"]] = [2025, 1985] if ambiguous else [2005, 1995]
@@ -21,7 +21,8 @@ def fixture_run(broker, direction=Direction.LONG, ambiguous=True, gap=False, cos
                     rationale="Synthetic test fixture", regime="test", indicators={"atr": 5})
     cost = cost or CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
                               swap_long_per_lot_day=0, swap_short_per_lot_day=0)
-    return run_backtest({"M15": frame, "H1": frame}, [signal], broker.spec("XAUUSD"), cost)
+    return run_backtest({"M15": frame, "H1": frame}, [signal], broker.spec("XAUUSD"), cost,
+                        risk_fraction=risk_fraction)
 
 
 @pytest.mark.parametrize("direction", [Direction.LONG, Direction.SHORT])
@@ -55,6 +56,11 @@ def test_degenerate_metrics_are_null(broker):
     assert result["metrics"]["annualized_return"] is None
     assert result["metrics"]["sharpe"] is None
     assert result["metrics"]["win_rate"] == 0
+
+
+def test_backtest_allows_user_risk_above_legacy_half_percent_cap(broker):
+    result = fixture_run(broker, risk_fraction=.01)
+    assert len(result["trades"]) == 1
 
 
 def test_partition_time_order_and_holdout_exclusion(synthetic_frames):
@@ -161,3 +167,41 @@ def test_configured_position_count_allows_more_than_one_simulated_position(broke
     result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost,
                           risk_fraction=0.001, risk_limits=limits)
     assert len(result["trades"]) == 2
+
+
+def test_rejection_audit_counts_only_candidate_entries(broker):
+    index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+        timestamp=index[2].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+        rationale="first candidate", regime="test", indicators={"atr": 5}),
+        Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+        timestamp=index[4].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+        rationale="candidate while the first position is open", regime="test", indicators={"atr": 5})]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost)
+
+    assert result["candidate_signal_count"] == 2
+    assert len(result["trades"]) == 1
+    assert result["risk_blocks"]["max_positions"] == 1
+
+
+def test_backtest_audits_minimum_lot_risk_rejections(broker):
+    index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    signal = Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+        timestamp=index[2].to_pydatetime(), entry=2000, stop_loss=1000, take_profit=3000,
+        rationale="minimum lot exceeds risk budget", regime="test", indicators={"atr": 5})
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+
+    result = run_backtest({"M15": frame}, [signal], broker.spec("XAUUSD"), cost,
+                          capital=1000, risk_fraction=.0025)
+
+    assert result["candidate_signal_count"] == 1
+    assert result["trades"].empty
+    assert result["risk_blocks"]["minimum_lot_risk"] == 1

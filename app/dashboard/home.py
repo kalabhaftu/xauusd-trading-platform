@@ -29,10 +29,14 @@ from app.domain import utcnow
 from app.execution.journal import trade_journal
 from app.indicators.core import atr, bollinger, ema, rsi
 from app.main import configured
+from app.monitoring.alerts import send_telegram_message
 from app.monitoring.health import service_health
 from app.strategies.registry import REGISTRY, build
 
 st.set_page_config(page_title="Aurum • XAU Research", page_icon="◈", layout="wide")
+if st.session_state.pop("clear_telegram_fields", False):
+    st.session_state.pop("setup_telegram_token", None)
+    st.session_state.pop("setup_telegram_chat", None)
 st.markdown("""<style>.block-container{padding-top:2rem;max-width:1600px}
 div[data-testid="stMetric"]{background:#19212d;padding:18px;border-radius:8px}
 h1{letter-spacing:-.04em} .stCaption{color:#9aabba}</style>""", unsafe_allow_html=True)
@@ -101,6 +105,15 @@ def remove_saved_reports(paths):
             failures.append(f"{candidate.name}: {exc}")
     return removed, failures
 
+
+def check_broker_connection(candidate=None):
+    from app.main import doctor
+
+    result = doctor(candidate or configured(store), store)
+    store.set("last_doctor_check", result)
+    return result
+
+
 pages = ["Getting Started", "Overview", "Market Analysis", "Backtesting Lab", "Trade Journal", "Strategies",
          "Risk Center", "System Logs", "Settings"]
 st.sidebar.title("◈ AURUM")
@@ -120,9 +133,26 @@ visible_mode = selected_stored_mode if selected_stored_mode in ("SIGNAL_ONLY", s
 st.sidebar.caption(f"Service: {health['state']} • Mode: "
                    f"{visible_mode}")
 st.sidebar.caption(f"Last refresh: {local_time(health.get('data_refresh'))}")
-if st.sidebar.button("Refresh persisted state"):
-    st.rerun()
+if st.sidebar.button("Refresh account from MT5", disabled=settings.mode not in ("DEMO", "LIVE")
+                     or not settings.account_login or not settings.account_server,
+                     help="Reads your MT5 balance, open trades, and P&L, then saves a fresh snapshot. It never places orders."):
+    with st.spinner("Checking MT5 and updating account details…"):
+        refresh_result = check_broker_connection()
+    if refresh_result.get("broker", "").startswith("verified"):
+        status = refresh_result.get("account", {})
+        st.session_state["workspace"] = "Overview"
+        st.session_state["setup_flash"] = {
+            "kind": "success",
+            "message": (f"MT5 connected: {status.get('environment')} account {status.get('login')} on "
+                        f"{status.get('server')}. Balance, positions, and P&L were refreshed."),
+        }
+        st.rerun()
+    else:
+        st.sidebar.error(refresh_result.get("broker", "MT5 account refresh failed."))
 st.title(page)
+flash = st.session_state.pop("setup_flash", None)
+if flash:
+    (st.success if flash.get("kind") == "success" else st.warning)(flash.get("message", ""))
 
 
 def payload_frame(table, limit=1000):
@@ -277,7 +307,7 @@ def candles_chart():
     if not choices:
         st.info("No broker candles are stored yet. Download history from the Backtesting Lab instructions.")
         return
-    preferred = "M15" if "M15" in choices else choices[0]
+    preferred = "M1" if "M1" in choices else choices[0]
     timeframe = st.selectbox("Downloaded timeframe", choices, index=choices.index(preferred))
     frame = store.load_candles(source, symbol, timeframe).tail(800)
     if frame.empty:
@@ -342,14 +372,6 @@ def launch_authorization(environment, login):
     st.info("Authorization checks started. No order is submitted by this action; check System Logs for the result.")
 
 
-def check_broker_connection(candidate=None):
-    from app.main import doctor
-
-    result = doctor(candidate or configured(store), store)
-    store.set("last_doctor_check", result)
-    return result
-
-
 if page == "Getting Started":
     st.subheader("Set up your account once")
     st.write("Choose the MT5 account, strategy, trading style, and risk limits here. Settings are saved on this PC; "
@@ -375,10 +397,16 @@ if page == "Getting Started":
         "Gold symbol", value=(settings.symbol or symbol or "") if same_environment else "",
         key=f"setup_symbol_{environment}", help="The exact Market Watch name, including a broker suffix such as m.",
     )
-    terminal_path = st.text_input(
-        "MT5 terminal (optional)", value=settings.mt5_path or "", key="setup_mt5_path",
-        help="Leave blank to let the MT5 Python package find the open terminal automatically.",
-    )
+    terminal_path = settings.mt5_path
+    with st.expander("MT5 connection troubleshooting (most users can skip this)"):
+        st.info("Aurum uses the official MetaTrader 5 connector to find and start the usual MT5 installation. "
+                "Leave the app location blank unless you have multiple MT5 installations or automatic connection fails. "
+                "If Windows asks whether to allow MT5 to open, keep security protection on and verify that the app's "
+                "publisher is MetaQuotes Ltd.; never disable Defender or run as administrator for this.")
+        terminal_path = st.text_input(
+            "MT5 app file location", value=settings.mt5_path or "", key="setup_mt5_path",
+            help="Advanced option: full path to terminal64.exe. Only set this when automatic discovery cannot find MT5.",
+        )
     if environment == "LIVE":
         st.error("LIVE ACCOUNT • REAL MONEY. Losses come from your real balance. Setup alone sends no orders.")
         live_ack = st.checkbox(
@@ -406,28 +434,32 @@ if page == "Getting Started":
 
     st.subheader("Risk limits")
     first, second, third = st.columns(3)
-    risk_pct = first.number_input("Risk per trade (% equity)", min_value=.01, max_value=.5,
+    risk_pct = first.number_input("Risk per trade (% equity)", min_value=.01, max_value=100.0,
                                   value=settings.risk_per_trade * 100, step=.01,
-                                  help="Maximum planned loss at the stop for one new trade. Default: 0.25%.")
-    hard_pct = second.number_input("Hard cap per trade (%)", min_value=.01, max_value=.5,
+                                  help="Planned loss if this trade hits its stop. Example: 1% of $1,000 is $10. A 100% setting can risk the full balance; gaps can exceed the plan.")
+    hard_pct = second.number_input("Per-trade risk limit (%)", min_value=.01, max_value=100.0,
                                    value=settings.hard_risk_max * 100, step=.01,
-                                   help="Absolute per-trade risk ceiling. Position size is rounded down to the broker lot step.")
-    portfolio_pct = third.number_input("Combined open risk (%)", min_value=.01, max_value=2.0,
+                                   help="Your maximum planned loss for one trade, up to 100% of equity. Position size is rounded down to the broker lot step.")
+    portfolio_pct = third.number_input("Combined open risk (%)", min_value=.01, max_value=100.0,
                                        value=settings.portfolio_risk_limit * 100, step=.01,
                                        help="Maximum equity risk across open positions and a proposed trade.")
     first, second, third = st.columns(3)
-    daily_pct = first.number_input("Daily loss stop (%)", min_value=.1, max_value=10.0,
+    daily_pct = first.number_input("Daily loss stop (%)", min_value=.1, max_value=100.0,
                                    value=settings.daily_loss_limit * 100, step=.1,
                                    help="Blocks entries after this loss from the 00:00 UTC daily equity baseline.")
-    weekly_pct = second.number_input("Weekly loss stop (%)", min_value=.1, max_value=20.0,
+    weekly_pct = second.number_input("Weekly loss stop (%)", min_value=.1, max_value=100.0,
                                      value=settings.weekly_loss_limit * 100, step=.1,
                                      help="Blocks entries after this loss from Monday 00:00 UTC.")
-    drawdown_pct = third.number_input("Maximum drawdown (%)", min_value=.1, max_value=50.0,
+    drawdown_pct = third.number_input("Maximum drawdown (%)", min_value=.1, max_value=100.0,
                                       value=settings.drawdown_limit * 100, step=.1,
                                       help="Blocks entries when equity falls this far from its recorded high-water mark.")
-    entries_per_session = st.number_input("Entries per session", min_value=1, max_value=100,
-                                          value=settings.max_orders_session, step=1,
-                                          help="Limits new entries in each strategy session; continuous strategies use UTC days.")
+    first, second = st.columns(2)
+    entries_per_session = first.number_input("Entries per session", min_value=1, max_value=100,
+                                             value=settings.max_orders_session, step=1,
+                                             help="Limits new entries in each strategy session; continuous strategies use UTC days.")
+    max_positions = second.number_input("Open positions at once", min_value=1,
+                                        value=settings.max_positions, step=1,
+                                        help="Maximum simultaneous positions for this account. The starter value is one.")
 
     with st.expander("More risk and cost settings", expanded=False):
         cost_mode = st.radio(
@@ -517,7 +549,7 @@ if page == "Getting Started":
                                            help="Create or copy the token from BotFather. Do not paste it into chat.")
             telegram_chat = st.text_input("Destination chat ID", value="", key="setup_telegram_chat",
                                           placeholder="Leave blank to keep the saved chat",
-                                          help="The numeric chat ID where this bot should send private status updates.")
+                                          help="The destination chat for updates. Open your bot in Telegram and press Start before connecting it; Telegram blocks bots from messaging users who have not started them.")
         if notifications_on and not telegram_configured and not (telegram_token.strip() and telegram_chat.strip()):
             st.warning("Telegram updates are selected, but no bot is connected. Add both credentials below to receive them.")
         st.caption("The broker's current commission and swap rates can change. Check them in MT5 before approving research.")
@@ -538,7 +570,8 @@ if page == "Getting Started":
                 "portfolio_risk_limit": portfolio_pct / 100, "daily_loss_limit": daily_pct / 100,
                 "weekly_loss_limit": weekly_pct / 100, "drawdown_limit": drawdown_pct / 100,
                 "max_spread": max_spread, "max_slippage_points": int(max_slippage),
-                "max_orders_session": int(entries_per_session), "consecutive_loss_limit": int(consecutive_losses),
+                "max_positions": int(max_positions), "max_orders_session": int(entries_per_session),
+                "consecutive_loss_limit": int(consecutive_losses),
                 "loss_cooldown_minutes": int(cooldown), "emergency_close_attempts": int(close_attempts),
                 "commission_per_lot": commission, "slippage_price": modeled_slippage,
                 "swap_long_per_lot_day": swap_long, "swap_short_per_lot_day": swap_short,
@@ -546,6 +579,19 @@ if page == "Getting Started":
             }
             if telegram_token.strip() and telegram_chat.strip():
                 save_telegram_credentials(telegram_token, telegram_chat)
+            new_telegram_connection = bool(telegram_token.strip() and telegram_chat.strip())
+            telegram_result = None
+            if new_telegram_connection:
+                notifications_on = True
+                st.session_state["clear_telegram_fields"] = True
+                telegram_result = send_telegram_message(
+                    telegram_token.strip(), telegram_chat.strip(),
+                    "Aurum is connected to Telegram. Trading and account updates are enabled.",
+                )
+                store.set("telegram_connection", {
+                    "ok": telegram_result[0], "checked_at": utcnow().isoformat(),
+                    "message": telegram_result[1],
+                })
             save_user_setup(store, settings, mode=environment, account_login=int(login_text),
                             account_server=account_server, symbol=selected_symbol, mt5_path=terminal_path,
                             settings_changes=risk_changes, strategy=strategy_name,
@@ -554,19 +600,36 @@ if page == "Getting Started":
                                                   "position_update_minutes": position_interval})
             result = check_broker_connection(configured(store))
             verified = result.get("broker", "").startswith("verified")
-            st.success("Settings saved. Your chosen execution mode is saved, but no order was authorized or submitted.")
+            telegram_notice = ""
+            if telegram_result:
+                telegram_notice = ("Telegram test sent successfully." if telegram_result[0] else
+                                   f"Telegram test failed: {telegram_result[1]}. Open the bot in Telegram and press Start, then check the chat ID.")
             if verified:
                 account_status = result.get("account", {})
-                st.info(f"Connected to {account_status.get('environment')} account "
-                        f"{account_status.get('login')} on {account_status.get('server')}. "
-                        f"MT5 Algo Trading: {'On' if account_status.get('terminal_algo_trading_allowed') else 'Off'}; "
-                        f"Python API: {'Allowed' if account_status.get('external_api_allowed') else 'Blocked'}.")
+                connection_message = (
+                    f"Connected to {account_status.get('environment')} account {account_status.get('login')} "
+                    f"on {account_status.get('server')}. Balance and open positions were refreshed. "
+                    f"MT5 Algo Trading: {'On' if account_status.get('terminal_algo_trading_allowed') else 'Off'}; "
+                    f"Python API: {'Allowed' if account_status.get('external_api_allowed') else 'Blocked'}. "
+                    "Auto execute is a saved preference; setup did not authorize or submit an order."
+                )
+                if telegram_notice:
+                    connection_message += " " + telegram_notice
+                st.session_state["workspace"] = "Overview"
+                st.session_state["setup_flash"] = {"kind": "success", "message": connection_message}
                 automatic_costs = result.get("automatic_costs")
                 if automatic_costs and not automatic_costs.get("verified"):
-                    st.warning("Automatic costs are estimates. The broker connection does not report its commission schedule, so these settings can be used for research but cannot approve automatic orders until you confirm the fees in Custom mode.")
+                    st.session_state["setup_flash"]["message"] += (
+                        " MT5 does not report its commission schedule; research uses an estimate until you confirm fees in Custom mode.")
+                st.rerun()
             else:
-                st.warning(result.get("broker", "Connection check did not return a result."))
-            st.rerun()
+                st.success("Your setup was saved. No order was submitted.")
+                st.error(result.get("broker", "MT5 connection could not be verified."))
+                st.info("Aurum asks the official MT5 connector to locate and start the normal installation. "
+                        "Keep MT5 logged into the account shown above, then use Refresh account from MT5. "
+                        "If it still fails, expand MT5 connection troubleshooting.")
+                if telegram_result and telegram_notice:
+                    (st.success if telegram_result[0] else st.warning)(telegram_notice)
         except Exception as exc:
             st.error(str(exc))
 
@@ -855,11 +918,11 @@ elif page == "Backtesting Lab":
         if operation != "compare-strategies" else None
     parameter_strategy = research_name
     stored_timeframes = available_timeframes()
-    entries = [tf for tf in ("M1", "M5", "M15", "M30") if tf in stored_timeframes]
+    entries = [tf for tf in ("M1", "M5", "M15", "M30", "H1", "H4", "D1") if tf in stored_timeframes]
     if not entries:
-        st.warning("Download one entry timeframe (M1/M5/M15/M30) before running historical analysis.")
-        entries = ["M15"]
-    timeframe = st.selectbox("Entry timeframe", entries, index=entries.index("M15") if "M15" in entries else 0,
+        st.warning("Download an entry timeframe (M1 through D1) before running historical analysis.")
+        entries = ["M1"]
+    timeframe = st.selectbox("Entry timeframe", entries, index=entries.index("M1") if "M1" in entries else 0,
                              help="Signals are generated from each completed candle at this interval.")
     first, second = st.columns(2)
     start = first.date_input("Start", value=(utcnow() - pd.Timedelta(days=365 * 3)).date(),
@@ -895,22 +958,22 @@ elif page == "Backtesting Lab":
                 st.dataframe(pd.DataFrame(coverage_rows).sort_values("Timeframe"),
                              width="stretch", hide_index=True)
                 st.caption("Each backtest uses the timeframe selected above. Lower-timeframe history may be shorter than three years; no candles are invented to fill gaps.")
-    default_capital = round(max(100.0, float(account.get("balance", 10000.0))), 2)
+    default_capital = 1000.0
     sizing = st.columns(2)
     capital = sizing[0].number_input("Starting balance for this backtest (USD)", min_value=1.0,
         value=default_capital, step=100.0,
-        help="Enter any simulated account balance, such as 1,000 or 5,000. This only changes the offline backtest; it does not deposit or move money. It defaults to the last verified MT5 account balance.")
-    risk_percent = sizing[1].number_input("Risk per trade (%)", min_value=0.01, max_value=0.5,
+        help="Enter any simulated starting balance, such as 1,000 or 5,000. This is separate from your connected MT5 account balance and only affects this offline backtest; it cannot deposit, withdraw, or send orders.")
+    risk_percent = sizing[1].number_input("Risk per trade (%)", min_value=0.01, max_value=100.0,
         value=settings.risk_per_trade * 100, step=0.01,
-        help="Percent of the starting balance budgeted for one trade, including estimated costs and broker lot-step rounding.")
+        help="Planned loss if a simulated trade hits its stop. Example: 1% of $1,000 is $10. A 100% setting can risk the full balance; gaps can exceed the plan.")
     risk_inputs = st.columns(3)
-    day_loss = risk_inputs[0].number_input("Daily loss stop (%)", min_value=0.01, max_value=10.0,
+    day_loss = risk_inputs[0].number_input("Daily loss stop (%)", min_value=0.01, max_value=100.0,
         value=settings.daily_loss_limit * 100, step=0.1,
         help="Block new simulated entries once losses reach this percent of the day's starting balance.")
-    week_loss = risk_inputs[1].number_input("Weekly loss stop (%)", min_value=0.01, max_value=20.0,
+    week_loss = risk_inputs[1].number_input("Weekly loss stop (%)", min_value=0.01, max_value=100.0,
         value=settings.weekly_loss_limit * 100, step=0.1,
         help="Block new simulated entries after this percent loss from Monday 00:00 UTC equity.")
-    portfolio_risk = risk_inputs[2].number_input("Combined open risk cap (%)", min_value=0.01, max_value=2.0,
+    portfolio_risk = risk_inputs[2].number_input("Combined open risk cap (%)", min_value=0.01, max_value=100.0,
         value=settings.portfolio_risk_limit * 100, step=0.01,
         help="Block an entry if estimated stop risk across open and proposed positions would exceed this percent.")
     sizing_summary = st.columns(3)
@@ -918,7 +981,7 @@ elif page == "Backtesting Lab":
     sizing_summary[1].metric("Daily loss limit", f"${capital * day_loss / 100:,.2f}")
     sizing_summary[2].metric("Weekly loss limit", f"${capital * week_loss / 100:,.2f}")
     sizing_summary = st.columns(2)
-    sizing_summary[0].metric("Hard per-trade cap", f"${capital * settings.hard_risk_max:,.2f}")
+    sizing_summary[0].metric("Per-trade risk limit", f"${capital * settings.hard_risk_max:,.2f}")
     sizing_summary[1].metric("Combined open-risk limit", f"${capital * portfolio_risk / 100:,.2f}")
     st.caption("Amounts are recalculated from the balance and percentages you enter. Broker minimum lot size may cause a trade to be skipped if it would exceed the risk cap.")
     if parameter_strategy:
@@ -960,7 +1023,7 @@ elif page == "Backtesting Lab":
         session_entries = columns[1].number_input("Entries per session", min_value=1,
             value=settings.max_orders_session, step=1,
             help="Maximum requested entries per named strategy session, or UTC day for continuous strategies.")
-        max_positions = columns[0].number_input("Simultaneous positions", min_value=1, max_value=10,
+        max_positions = columns[0].number_input("Simultaneous positions", min_value=1,
             value=settings.max_positions, step=1,
             help="Maximum number of open simulated positions. The live/demo default remains one position.")
     consume_holdout = False

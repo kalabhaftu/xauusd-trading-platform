@@ -14,8 +14,10 @@ high-water mark. Initial startup mid-period leaves that period unverified. The s
 boundaries continuously, with checkpoints no more than 15 seconds apart. A restart across a missed boundary blocks
 entries until a trustworthy later checkpoint; it does not invent midnight equity from balance alone.
 
-Limits are 0.25% per-trade risk, 0.5% hard maximum, 1% daily loss, 3% weekly loss, 10% drawdown, one position,
-0.5% combined risk, three entries per session (UTC day for continuous strategies), and three consecutive losses.
+Starter values are 0.25% planned risk per trade, 1% daily loss, 3% weekly loss, 10% drawdown, one open position,
+three entries per session (UTC day for continuous strategies), and three consecutive losses. Users can change risk
+percentages, loss limits, and open-position count in Getting Started; the app allows settings up to 100% instead of
+enforcing the former 0.5% per-trade ceiling. Planned stops can be exceeded by gaps and fast-market fills.
 Sizing reserves 10% of free margin and budgets adverse execution, commission, and a financing allowance.
 These are modeled risk limits: gaps and broker failures can create losses larger than a stop-based budget.
 

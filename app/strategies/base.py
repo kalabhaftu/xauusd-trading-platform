@@ -12,7 +12,7 @@ from app.domain import Direction, Model, Signal, digest
 class Parameters(Model):
     """Settings shared by the strategy implementations."""
 
-    entry_timeframe: Literal["M1", "M5", "M15", "M30"] = "M15"
+    entry_timeframe: Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"] = "M1"
     max_holding_hours: int = Field(default=24, ge=1, le=168)
 
 

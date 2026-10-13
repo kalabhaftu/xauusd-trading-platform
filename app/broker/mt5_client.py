@@ -46,8 +46,22 @@ class MT5Broker:
                   "timeout": 10000}
         if self.settings.account_password:
             kwargs["password"] = self.settings.account_password.get_secret_value()
-        if not self.mt5.initialize(path=self.settings.mt5_path, **kwargs):
-            raise BrokerError(f"MT5 initialization failed ({self.mt5.last_error()[0]})")
+        # Omitting path lets the official package discover and start the installed terminal.
+        # Passing path=None can be rejected by the native extension as invalid parameters.
+        initialized = (self.mt5.initialize(self.settings.mt5_path, **kwargs)
+                       if self.settings.mt5_path else self.mt5.initialize(**kwargs))
+        if not initialized:
+            error = self.mt5.last_error()
+            code = error[0] if error else "unknown"
+            if code == -2:
+                raise BrokerError(
+                    "MT5 rejected its connection settings (-2: invalid parameters). Check that the account "
+                    "number is numeric, the server name exactly matches MT5, and any selected app file is "
+                    "the real terminal64.exe. Clear the app location to let MT5 find it automatically."
+                )
+            description = error[1] if error and len(error) > 1 else ""
+            detail = f": {description}" if description else ""
+            raise BrokerError(f"MT5 initialization failed ({code}){detail}")
         try:
             # Initialization is also used by doctor and historical research. Those paths only
             # read account/market data and must remain available while terminal trading is off.

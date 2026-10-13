@@ -35,13 +35,13 @@ class CostProfile(Model):
 class BacktestRiskLimits(Model):
     """Portfolio limits applied to every historical entry decision."""
 
-    daily_loss_limit: float = Field(default=0.01, gt=0, le=0.1)
-    weekly_loss_limit: float = Field(default=0.03, gt=0, le=0.2)
-    drawdown_limit: float = Field(default=0.10, gt=0, le=0.5)
+    daily_loss_limit: float = Field(default=0.05, gt=0, le=1)
+    weekly_loss_limit: float = Field(default=0.03, gt=0, le=1)
+    drawdown_limit: float = Field(default=0.10, gt=0, le=1)
     consecutive_loss_limit: int = Field(default=3, ge=1)
     max_orders_session: int = Field(default=3, ge=1)
-    max_positions: int = Field(default=1, ge=1, le=10)
-    portfolio_risk_limit: float = Field(default=0.005, gt=0, le=0.02)
+    max_positions: int = Field(default=1, ge=1)
+    portfolio_risk_limit: float = Field(default=1.0, gt=0, le=1)
 
 
 class CFDBroker(_Broker):
@@ -120,13 +120,17 @@ class CFDBroker(_Broker):
 def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: SymbolSpec, cost: CostProfile,
                  capital: float = 10000, risk_fraction: float = 0.0025,
                  start: pd.Timestamp | None = None, end: pd.Timestamp | None = None,
-                 timeframe="M15", risk_limits: BacktestRiskLimits | None = None,
+                 timeframe: str | None = None, risk_limits: BacktestRiskLimits | None = None,
                  configuration: dict | None = None) -> dict:
-    if capital <= 0 or not 0 < risk_fraction <= 0.005:
+    if capital <= 0 or not 0 < risk_fraction <= 1:
         raise ValueError("Invalid capital or risk fraction")
     if cost.account_currency != "USD" or spec.currency_profit != "USD" or cost.price_basis != "bid" \
             or spec.price_basis != "bid":
         raise ValueError("Initial research supports explicitly confirmed bid-based USD gold CFD valuation only")
+    if timeframe is None:
+        timeframe = next((candidate for candidate in TIMEFRAMES if candidate in frames), None)
+        if timeframe is None:
+            raise ValueError("No supported candle timeframe was provided")
     minutes = TIMEFRAMES[timeframe]
     frame = frames[timeframe].copy()
     validate(frame, timeframe)
@@ -181,11 +185,11 @@ def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: S
                 metadata = trade.tag or {}
                 if metadata.get("exit_at") and stamp + pd.Timedelta(minutes=minutes) >= pd.Timestamp(metadata["exit_at"]):
                     trade.close()
-            if len(self.trades) >= limits.max_positions:
-                risk_events["max_positions"] = risk_events.get("max_positions", 0) + 1
-                return
             proposed = mapping.get(stamp)
             if proposed is None or (proposed.expires_at and stamp > pd.Timestamp(proposed.expires_at)):
+                return
+            if len(self.trades) >= limits.max_positions:
+                risk_events["max_positions"] = risk_events.get("max_positions", 0) + 1
                 return
             day_loss = max(0.0, (self._day_equity - current_equity) / max(self._day_equity, 1.0))
             week_loss = max(0.0, (self._week_equity - current_equity) / max(self._week_equity, 1.0))
@@ -210,6 +214,7 @@ def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: S
                 if sign == 1 else float(self.data.Close[-1]) - cost.slippage_price * multiplier
             if sign * (indicative - proposed.stop_loss * multiplier) <= 0 \
                     or sign * (proposed.take_profit * multiplier - indicative) <= 0:
+                risk_events["invalid_bracket_after_costs"] = risk_events.get("invalid_bracket_after_costs", 0) + 1
                 return
             distance = abs(proposed.entry - proposed.stop_loss) * multiplier
             fees = 2 * cost.commission_per_lot * spec.volume_step
@@ -217,6 +222,7 @@ def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: S
             quantity = min(math.floor(self.equity * risk_fraction / (distance + fees)),
                            math.floor(spec.volume_max / spec.volume_step))
             if quantity * spec.volume_step < spec.volume_min:
+                risk_events["minimum_lot_risk"] = risk_events.get("minimum_lot_risk", 0) + 1
                 return
             horizon_days = max(1, math.ceil((pd.Timestamp(proposed.exit_at) - utc).total_seconds() / 86400)) \
                 if proposed.exit_at else 7
@@ -273,4 +279,5 @@ def run_backtest(frames: dict[str, pd.DataFrame], signals: list[Signal], spec: S
             "dataset_hash": digest({tf: f.to_json(date_format="iso") for tf, f in frames.items()}),
             "engine": "backtesting.py 0.6.5 + CFDBroker v1", "entry_timeframe": timeframe,
             "risk_limits": limits.model_dump(), "risk_blocks": risk_events,
+            "candidate_signal_count": len(mapping),
             "configuration": configuration or {"risk_fraction": risk_fraction, "timeframe": timeframe}}

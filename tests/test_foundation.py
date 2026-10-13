@@ -5,11 +5,14 @@ from datetime import timedelta
 import pytest
 from pydantic import ValidationError
 
+from app.backtesting.engine import BacktestRiskLimits
 from app.config.settings import Settings
 from app.domain import utcnow
+from app.main import configured, parser
 from app.monitoring.health import service_health
 from app.monitoring.logger import RedactingFormatter
 from app.risk.circuit_breaker import CircuitBreaker
+from app.strategies.base import Parameters
 
 
 def test_settings_default_auto_mode_stays_disarmed_and_live_is_configurable():
@@ -17,6 +20,7 @@ def test_settings_default_auto_mode_stays_disarmed_and_live_is_configurable():
     assert settings.mode == "DEMO" and not settings.entries_armed
     assert settings.auto_execution_mode == "AUTO_DEMO"
     assert settings.cost_mode == "AUTO"
+    assert settings.daily_loss_limit == .05
     assert settings.max_spread == .5 and settings.max_slippage_points == 20 and settings.slippage_price == .2
     settings.require_costs()
     live = Settings(_env_file=None, mode="LIVE", account_login=123, account_server="Exness-Real",
@@ -27,8 +31,29 @@ def test_settings_default_auto_mode_stays_disarmed_and_live_is_configurable():
         live.require_demo()
     with pytest.raises(ValidationError):
         Settings(_env_file=None, entries_armed=True)
+    flexible = Settings(_env_file=None, risk_per_trade=.75, hard_risk_max=1.0,
+                        portfolio_risk_limit=1.0)
+    assert flexible.risk_per_trade == .75
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, risk_per_trade=.006)
+        Settings(_env_file=None, risk_per_trade=1.01, hard_risk_max=1.0)
+
+
+def test_research_defaults_are_one_minute_with_independent_capital():
+    args = parser().parse_args(["backtest"])
+    assert args.timeframe == "M1"
+    assert args.capital == 1000
+    assert Parameters().entry_timeframe == "M1"
+    assert BacktestRiskLimits().daily_loss_limit == .05
+
+
+def test_legacy_half_percent_caps_are_migrated_to_user_configurable(store, monkeypatch):
+    monkeypatch.setattr("app.main.Settings", lambda **values: Settings(
+        _env_file=None, **values) if values else Settings(
+            _env_file=None, hard_risk_max=.005, portfolio_risk_limit=.005))
+    store.set("settings_override", {"hard_risk_max": .005, "portfolio_risk_limit": .005})
+    settings = configured(store)
+    assert settings.hard_risk_max == 1.0
+    assert settings.portfolio_risk_limit == 1.0
 
 
 def test_secrets_redacted():

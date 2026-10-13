@@ -3,6 +3,23 @@ import threading
 import httpx
 
 
+def send_telegram_message(token: str, chat_id: str, text: str) -> tuple[bool, str]:
+    """Send one bounded Telegram message and return a user-safe result."""
+    try:
+        response = httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text[:3500]},
+            timeout=5,
+        )
+        payload = response.json()
+        if response.is_success and payload.get("ok"):
+            return True, "Message delivered"
+        return False, str(payload.get("description") or f"Telegram returned HTTP {response.status_code}")
+    except Exception:
+        # Exception text can include the bot token in the Telegram URL.
+        return False, "Could not reach Telegram. Check the internet connection and try again."
+
+
 class AlertWorker:
     """Best-effort durable notification outbox, independent of execution latency."""
     def __init__(self, settings, store):
@@ -44,13 +61,7 @@ class AlertWorker:
                               self.settings.telegram_chat_id):
                     if value:
                         text = text.replace(value.get_secret_value(), "[REDACTED]")
-                try:
-                    response = httpx.post(
-                        f"https://api.telegram.org/bot{self.settings.telegram_token.get_secret_value()}/sendMessage",
-                        json={"chat_id": self.settings.telegram_chat_id.get_secret_value(), "text": text[:3500]},
-                        timeout=5,
-                    )
-                    delivered = response.is_success and response.json().get("ok", False)
-                except Exception:
-                    delivered = False
+                delivered, _ = send_telegram_message(
+                    self.settings.telegram_token.get_secret_value(),
+                    self.settings.telegram_chat_id.get_secret_value(), text)
                 self.store.set(key, {"attempts": delivery["attempts"] + 1, "delivered": delivered})

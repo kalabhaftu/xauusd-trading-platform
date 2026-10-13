@@ -23,13 +23,13 @@ class Settings(BaseSettings):
     active_strategy: str = "ict_sweep_mss_fvg"
     cost_mode: Literal["AUTO", "CUSTOM"] = "AUTO"
     entries_armed: bool = False
-    risk_per_trade: float = Field(default=0.0025, gt=0, le=0.005)
-    hard_risk_max: float = Field(default=0.005, gt=0, le=0.005)
-    daily_loss_limit: float = Field(default=0.01, gt=0, le=0.1)
-    weekly_loss_limit: float = Field(default=0.03, gt=0, le=0.2)
-    drawdown_limit: float = Field(default=0.10, gt=0, le=0.5)
-    portfolio_risk_limit: float = Field(default=0.005, gt=0, le=0.02)
-    max_positions: int = Field(default=1, ge=1, le=1)
+    risk_per_trade: float = Field(default=0.0025, gt=0, le=1)
+    hard_risk_max: float = Field(default=1.0, gt=0, le=1)
+    daily_loss_limit: float = Field(default=0.05, gt=0, le=1)
+    weekly_loss_limit: float = Field(default=0.03, gt=0, le=1)
+    drawdown_limit: float = Field(default=0.10, gt=0, le=1)
+    portfolio_risk_limit: float = Field(default=1.0, gt=0, le=1)
+    max_positions: int = Field(default=1, ge=1)
     max_orders_session: int = Field(default=3, ge=1)
     consecutive_loss_limit: int = Field(default=3, ge=1)
     loss_cooldown_minutes: int = Field(default=60, ge=1)

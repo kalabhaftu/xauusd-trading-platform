@@ -5,13 +5,16 @@ def test_gui_setup_persists_auto_preference_without_arming(settings, store):
     result = save_user_setup(
         store, settings, mode="DEMO", account_login=12345, account_server="Exness-Demo",
         symbol="XAUUSDm", mt5_path=None,
-        settings_changes={"risk_per_trade": .0025, "max_spread": .5,
+        settings_changes={"risk_per_trade": .02, "hard_risk_max": 1.0,
+                          "portfolio_risk_limit": 1.0, "max_positions": 4, "max_spread": .5,
                           "session_file": None}, strategy="ict_sweep_mss_fvg", execution_mode="AUTO_DEMO",
         telegram_preferences={"enabled": True, "events": ["signal", "position_update"],
                               "position_update_minutes": 15},
     )
 
     assert result.mode == "DEMO"
+    assert result.risk_per_trade == .02
+    assert result.max_positions == 4
     assert store.get("execution_mode:Exness-Demo:12345") == "AUTO_DEMO"
     assert store.get("setup_complete") is True
     assert store.get("armed:Exness-Demo:12345") == {"active": False}

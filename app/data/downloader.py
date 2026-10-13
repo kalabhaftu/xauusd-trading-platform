@@ -46,7 +46,7 @@ def download(broker, store, symbol: str, timeframe: str, start: datetime, end: d
     return quality
 
 
-def research_frames(store, source: str, symbol: str, entry="M15", trend=None) -> dict[str, pd.DataFrame]:
+def research_frames(store, source: str, symbol: str, entry="M1", trend=None) -> dict[str, pd.DataFrame]:
     # Strategy implementations may request additional timeframes in a future
     # version; current researched rules are single-timeframe and use completed
     # entry bars only.

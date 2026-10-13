@@ -79,3 +79,9 @@ def test_old_prototype_strategy_names_are_not_registered():
             assert "Unknown strategy" in str(error)
         else:
             raise AssertionError(f"retired strategy remained registered: {name}")
+
+
+def test_support_resistance_accepts_every_stored_timeframe():
+    for timeframe in ("M1", "M5", "M15", "M30", "H1", "H4", "D1"):
+        strategy = build("support_resistance_bounce", {"entry_timeframe": timeframe})
+        assert strategy.parameters.entry_timeframe == timeframe

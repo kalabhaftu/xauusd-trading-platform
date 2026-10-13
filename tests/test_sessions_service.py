@@ -152,7 +152,7 @@ def test_manual_position_is_reported_but_never_marked_as_bot_owned(settings, sto
 def test_monitoring_service_persists_real_adapter_state_disarmed(settings, store, broker):
     # Test fixtures are explicit and injected; runtime never substitutes this broker.
     now = utcnow()
-    for tf, freq, count in (("M15", "15min", 1000),):
+    for tf, freq, count in (("M1", "min", 1000), ("M15", "15min", 1000)):
         index = pd.date_range(end=pd.Timestamp(now).floor(freq), periods=count, freq=freq)
         broker.frames[tf] = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
                                          "tick_volume": 1, "spread": 20, "real_volume": 0}, index=index)
@@ -162,7 +162,7 @@ def test_monitoring_service_persists_real_adapter_state_disarmed(settings, store
     assert store.get("service")["strategies"] == ["ict_sweep_mss_fvg", "support_resistance_bounce"]
     assert store.get("active_account")["equity"] == 10000
     assert broker.send_count == 0
-    assert not store.load_candles("Exness-Demo", "XAUUSD", "M15").empty
+    assert not store.load_candles("Exness-Demo", "XAUUSD", "M1").empty
 
 
 def test_graceful_shutdown_revokes_permission(settings, store, broker):

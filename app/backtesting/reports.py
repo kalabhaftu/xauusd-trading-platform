@@ -30,6 +30,15 @@ def export_report(result: dict, report_dir: Path, label: str) -> Path:
     configuration = pd.json_normalize(result.get("configuration", {}), sep=" / ").melt(
         var_name="Setting", value_name="Value") if result.get("configuration") else pd.DataFrame()
     text = f"<h1>{html.escape(label)}</h1><p>Historical simulation. No broker orders were submitted.</p>"
+    audit = {"Candidate signals": result.get("candidate_signal_count", 0),
+             "Simulated trades": len(result["trades"]),
+             "Risk / sizing rejections": sum(result.get("risk_blocks", {}).values())}
+    text += "<h2>Execution audit</h2>" + pd.DataFrame(
+        [{"Measure": key, "Count": value} for key, value in audit.items()]).to_html(index=False, escape=True)
+    if result.get("risk_blocks"):
+        text += "<h3>Rejection reasons</h3>" + pd.DataFrame(
+            [{"Reason": key, "Count": value} for key, value in result["risk_blocks"].items()]
+        ).to_html(index=False, escape=True)
     text += "<h2>Performance</h2>" + metrics.to_html(index=False, escape=True)
     if not configuration.empty:
         text += "<h2>Run settings</h2>" + configuration.to_html(index=False, escape=True)

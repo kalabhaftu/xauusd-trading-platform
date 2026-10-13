@@ -17,7 +17,7 @@ def save_user_setup(store, current: Settings, *, mode: str, account_login: int,
     if account_login < 1 or not account_server.strip() or not symbol.strip():
         raise ValueError("Enter the account number, exact server name, and gold symbol")
     editable = {"cost_mode", "risk_per_trade", "hard_risk_max", "daily_loss_limit", "weekly_loss_limit",
-                "drawdown_limit", "portfolio_risk_limit", "max_orders_session", "consecutive_loss_limit",
+                "drawdown_limit", "portfolio_risk_limit", "max_positions", "max_orders_session", "consecutive_loss_limit",
                 "loss_cooldown_minutes", "emergency_close_attempts", "max_spread", "max_slippage_points",
                 "commission_per_lot", "slippage_price", "swap_long_per_lot_day", "swap_short_per_lot_day",
                 "poll_seconds", "session_file"}

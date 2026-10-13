@@ -49,6 +49,26 @@ def test_dashboard_lands_on_guided_setup_with_auto_selected(tmp_path, monkeypatc
     assert any("Save once to finish setup" in item.value for item in application.info)
 
 
+def test_backtest_starting_balance_is_independent_of_connected_account(tmp_path, monkeypatch):
+    from app.database.storage import Store
+
+    database_url = f"sqlite:///{tmp_path / 'dashboard.db'}"
+    monkeypatch.setenv("XAU_DATABASE_URL", database_url)
+    store = Store(database_url)
+    store.create_for_tests()
+    store.set("active_account", {"server": "Exness-Demo", "login": 12345, "balance": 989.68})
+    store.set("setup_complete", True)
+
+    application = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app/dashboard/home.py"))
+    application.run(timeout=30)
+    application.sidebar.selectbox[0].set_value("Backtesting Lab").run(timeout=30)
+
+    assert not application.exception
+    capital = next(item for item in application.number_input
+                   if item.label == "Starting balance for this backtest (USD)")
+    assert capital.value == 1000.0
+
+
 def test_dashboard_labels_live_as_real_money_and_defaults_auto(tmp_path, monkeypatch):
     monkeypatch.setenv("XAU_DATABASE_URL", f"sqlite:///{tmp_path / 'dashboard.db'}")
     monkeypatch.setenv("XAU_MODE", "LIVE")
@@ -170,4 +190,4 @@ def test_dashboard_marks_daily_pnl_snapshot_stale(monkeypatch, store, broker):
     assert "Weekly loss stop (%)" in inputs
     assert "Combined open risk cap (%)" in inputs
     assert {"Risk per trade", "Daily loss limit", "Weekly loss limit",
-            "Hard per-trade cap", "Combined open-risk limit"} <= metrics
+            "Per-trade risk limit", "Combined open-risk limit"} <= metrics

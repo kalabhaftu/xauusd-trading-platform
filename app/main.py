@@ -18,6 +18,11 @@ def configured(store=None):
         values = settings.model_dump()
         values.update(store.get("settings_override", {}))
         values.update(store.get("broker_override", {}))
+        # Earlier releases hard-limited the per-trade ceiling to 0.5% by default.
+        # Treat that exact legacy value as the old default; users can now choose their own limit.
+        for key in ("hard_risk_max", "portfolio_risk_limit"):
+            if values.get(key) == 0.005:
+                values[key] = 1.0
         if values.get("cost_mode", "AUTO") == "AUTO":
             source = values.get("account_server")
             selected_symbol = values.get("symbol") or store.get("active_symbol")
@@ -269,7 +274,7 @@ def parser():
         research.add_argument("--symbol")
         research.add_argument("--start")
         research.add_argument("--end")
-        research.add_argument("--capital", type=float, default=10000)
+        research.add_argument("--capital", type=float, default=1000)
         research.add_argument("--spread", type=float)
         research.add_argument("--commission", type=float)
         research.add_argument("--slippage", type=float)
@@ -280,7 +285,8 @@ def parser():
         research.add_argument("--parameters-json", default="{}")
         research.add_argument("--margin", type=float, default=.01)
         research.add_argument("--policy", default="configs/research.json")
-        research.add_argument("--timeframe", choices=["M1", "M5", "M15", "M30"], default="M15")
+        research.add_argument("--timeframe", choices=["M1", "M5", "M15", "M30", "H1", "H4", "D1"],
+                              default="M1")
         if name == "validate-strategy":
             research.add_argument("--consume-holdout", action="store_true")
     for name, flag in (("arm-demo", "--confirm-first-order"),
@@ -404,6 +410,7 @@ def main(argv=None):
                           "report": str(folder.resolve()), "approval": "exploratory run only",
                           "cost_review_required": not cost.costs_verified,
                           "configuration": result["configuration"], "risk_blocks": result["risk_blocks"],
+                          "candidate_signal_count": result["candidate_signal_count"],
                           "trade_count": len(result["trades"])}
                 store.record("backtest_results", output)
             else:

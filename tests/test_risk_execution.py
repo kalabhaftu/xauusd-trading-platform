@@ -45,7 +45,7 @@ def test_risk_approval_and_daily_halt(settings, store, broker, signal, book, sch
     manager = RiskManager(settings, store, broker)
     state = Reconciliation(safe=True, reasons=[], positions=[])
     assert manager.evaluate(signal, utcnow(), book, state, schedule).approved
-    book["daily_loss"] = .01
+    book["daily_loss"] = settings.daily_loss_limit
     assert not manager.evaluate(signal, utcnow(), book, state, schedule).approved
     assert CircuitBreaker(store, broker.account().key).current()["active"]
 
@@ -248,7 +248,7 @@ def test_arming_refreshes_equity_before_authorization(settings, store, broker, m
     previous.update(day_verified=True, week_verified=True)
     store.set(equity.key, previous)
     store.set(f"history_start:{broker.account().key}", (now - timedelta(days=35)).isoformat())
-    broker._account = broker._account.model_copy(update={"equity": 9800})
+    broker._account = broker._account.model_copy(update={"equity": 9400})
     monkeypatch.setattr("app.broker.mt5_client.MT5Broker", lambda _: broker)
     with pytest.raises(ValueError, match="daily_loss"):
         arm_execution(settings, store, Namespace(command="arm-demo", confirm_account=settings.account_login,
