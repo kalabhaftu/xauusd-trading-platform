@@ -113,7 +113,7 @@ def research(store, frames, names, spec, cost, report_dir, capital=10000, consum
         raise ValueError("Verify broker commission, slippage, and financing in Getting Started before using the holdout")
     policy = policy or ResearchPolicy()
     risk_limits = risk_limits or BacktestRiskLimits()
-    entry_timeframe = next(tf for tf in ("M1", "M5", "M15", "M30") if tf in frames)
+    entry_timeframe = next(tf for tf in TIMEFRAMES if tf in frames and not frames[tf].empty)
     base = {**(base_parameters or {}), "entry_timeframe": entry_timeframe}
     candidate_bases = {
         name: {**store.get(f"strategy_parameters:{name}", {}), **base}

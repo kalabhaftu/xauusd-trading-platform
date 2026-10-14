@@ -187,6 +187,10 @@ def test_rejection_audit_counts_only_candidate_entries(broker):
     assert result["candidate_signal_count"] == 2
     assert len(result["trades"]) == 1
     assert result["risk_blocks"]["max_positions"] == 1
+    blocked = result["entry_decisions"].loc[result["entry_decisions"].reason == "max_positions"].iloc[0]
+    assert blocked.risk_budget_usd == pytest.approx(25)
+    assert blocked.estimated_minimum_lot_risk_usd == pytest.approx(10)
+    assert blocked.minimum_capital == pytest.approx(4000)
 
 
 def test_backtest_audits_minimum_lot_risk_rejections(broker):
@@ -205,3 +209,232 @@ def test_backtest_audits_minimum_lot_risk_rejections(broker):
     assert result["candidate_signal_count"] == 1
     assert result["trades"].empty
     assert result["risk_blocks"]["minimum_lot_risk"] == 1
+
+
+def test_r_uses_the_all_in_initial_risk_including_costs(broker):
+    cost = CostProfile(commission_per_lot=5, spread_price=.2, slippage_price=.1,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    trade = fixture_run(broker, cost=cost)["trades"].iloc[0]
+    assert trade.R == pytest.approx(trade.PnL / trade.InitialRiskUSD)
+    assert trade.R == pytest.approx(-1)
+
+
+def test_signal_expiry_blocks_a_next_bar_fill_after_missing_history(broker):
+    index = pd.DatetimeIndex(["2024-01-01T00:00Z", "2024-01-01T00:15Z", "2024-01-02T00:00Z",
+                              "2024-01-02T00:15Z", "2024-01-02T00:30Z"])
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    signal = Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                    timestamp=(index[1] + timedelta(minutes=15)).to_pydatetime(), entry=2000,
+                    stop_loss=1990, take_profit=2020, expires_at=pd.Timestamp("2024-01-01T00:45Z"),
+                    rationale="expired across an unresolved gap", regime="test", indicators={})
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    result = run_backtest({"M15": frame}, [signal], broker.spec("XAUUSD"), cost)
+    assert result["trades"].empty
+    assert result["risk_blocks"]["expired_signal"] == 1
+    assert result["execution_audit"]["filled"] == 0
+
+
+def test_funding_minimum_lot_rejection_is_counted_and_has_capital_estimate(broker):
+    index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2000.2, "low": 1999.8, "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    signal = Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                    timestamp=index[2].to_pydatetime(), entry=2000, stop_loss=1998.5, take_profit=2005,
+                    exit_at=(index[2] + timedelta(hours=24)).to_pydatetime(),
+                    rationale="funding pushes the minimum lot above budget", regime="test", indicators={})
+    cost = CostProfile(commission_per_lot=0, spread_price=.5, slippage_price=.2,
+                       swap_long_per_lot_day=-51.64, swap_short_per_lot_day=0)
+    result = run_backtest({"M15": frame}, [signal], broker.spec("XAUUSD"), cost, capital=1000)
+    assert result["trades"].empty
+    assert result["risk_blocks"]["minimum_lot_risk"] == 1
+    assert result["entry_decisions"].iloc[0].minimum_capital == pytest.approx(1166.56)
+
+
+def test_explicit_research_cooldown_resumes_after_the_loss_streak(broker):
+    index = pd.date_range("2024-01-01", periods=12, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    frame.loc[index[[3, 8]], "low"] = 1985
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                      timestamp=index[i].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+                      rationale="cooldown research fixture", regime="test", indicators={}) for i in [2, 4, 7]]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    limits = BacktestRiskLimits(consecutive_loss_limit=1, consecutive_loss_policy="cooldown",
+                                loss_cooldown_minutes=30)
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost, risk_limits=limits)
+    assert len(result["trades"]) == 2
+    assert result["risk_blocks"]["consecutive_loss_limit"] == 1
+    assert result["execution_audit"]["filled"] + result["execution_audit"]["rejected"] == 3
+
+
+@pytest.mark.parametrize("limit", ["daily_loss_limit", "weekly_loss_limit"])
+def test_utc_reset_counts_a_loss_on_the_first_bar_of_the_new_period(broker, limit):
+    # Sunday to Monday tests both the daily and weekly boundary.
+    index = pd.date_range("2024-01-07 23:15", periods=10, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    frame.loc[index[3], "low"] = 1985
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                      timestamp=index[i].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+                      rationale="UTC boundary fixture", regime="test", indicators={}) for i in [2, 4]]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost,
+                          risk_limits=BacktestRiskLimits(**{limit: .001}))
+    assert len(result["trades"]) == 1
+    assert result["risk_blocks"][limit] == 1
+
+
+def test_fill_time_margin_rejection_and_duplicates_are_audited(broker):
+    index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    signal = Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                    timestamp=index[2].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+                    rationale="margin fixture", regime="test", indicators={})
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0, margin_fraction=1)
+    result = run_backtest({"M15": frame}, [signal, signal], broker.spec("XAUUSD"), cost,
+                          capital=1000, risk_fraction=.5)
+    assert result["trades"].empty
+    assert result["risk_blocks"] == {"duplicate_completed_candle": 1, "insufficient_margin": 1}
+    assert result["execution_audit"]["rejected"] == result["candidate_signal_count"] == 2
+    assert result["entry_decisions"].risk_budget_usd.tolist() == [500, 500]
+
+
+def test_daily_order_limit_restarts_on_the_next_utc_day(broker):
+    index = pd.date_range("2024-01-01 23:15", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    frame.loc[index[3], "low"] = 1985
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                      timestamp=index[i].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+                      session="London", rationale="daily session quota fixture", regime="test", indicators={})
+               for i in [2, 4]]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    limits = BacktestRiskLimits(max_orders_session=1)
+
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost, risk_limits=limits)
+
+    assert len(result["trades"]) == 2
+    assert result["risk_blocks"].get("max_orders_session", 0) == 0
+
+
+def test_daily_entry_quota_applies_across_named_sessions(broker):
+    index = pd.date_range("2024-01-01", periods=9, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                      timestamp=index[i].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+                      session=session, rationale="UTC daily quota fixture", regime="test", indicators={})
+               for i, session in [(2, "London"), (4, "New York")]]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost,
+                          risk_limits=BacktestRiskLimits(max_orders_session=1, max_positions=2))
+
+    assert len(result["trades"]) == 1
+    assert result["risk_blocks"]["max_orders_session"] == 1
+
+
+def test_fill_gap_cannot_push_combined_risk_over_portfolio_limit(broker):
+    index = pd.date_range("2024-01-01", periods=9, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2002., "low": 1998., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    frame.loc[index[3], ["open", "high", "low", "close"]] = [2001., 2003., 2001., 2002.]
+    signals = [
+        Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+               timestamp=index[2].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+               rationale="first position consumes risk budget", regime="test", indicators={}),
+        Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+               timestamp=index[3].to_pydatetime(), entry=2000, stop_loss=1991, take_profit=2020,
+               rationale="fill gap expands the second risk", regime="test", indicators={}),
+    ]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    limits = BacktestRiskLimits(max_positions=2, portfolio_risk_limit=.197)
+
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost,
+                          capital=1000, risk_fraction=.1, risk_limits=limits)
+
+    assert len(result["trades"]) == 2
+    assert result["trades"].Size.abs().tolist() == [10, 9]
+    # Only the $10 open-quote gain is available when the second trade fills.
+    # The additional gain at this candle's future close cannot affect sizing.
+    assert result["entry_decisions"].iloc[1].risk_budget_usd == pytest.approx(101)
+    assert result["trades"].InitialRiskUSD.sum() <= (1000 + 10) * limits.portfolio_risk_limit
+
+
+def test_failed_gap_fill_does_not_consume_daily_trade_quota(broker):
+    index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999.5, "close": 2000.}, index=index)
+    frame.loc[index[2], ["open", "high"]] = [2005., 2006.]
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                      timestamp=index[i].to_pydatetime(), entry=2000, stop_loss=1999, take_profit=2010,
+                      rationale="gap failure followed by valid order", regime="test", indicators={}) for i in (2, 4)]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost, capital=1000,
+                          risk_limits=BacktestRiskLimits(max_orders_session=1))
+    assert result["trades"].EntryTime.tolist() == [index[4]]
+    assert result["risk_blocks"] == {"minimum_lot_risk_at_fill": 1}
+
+
+def test_setup_study_executes_over_budget_setups_without_reporting_account_returns(broker):
+    index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.}, index=index)
+    frame.loc[index[5], "low"] = 1985
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                      timestamp=index[i].to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+                      rationale="independent setup study fixture", regime="test", indicators={}) for i in (2, 3, 4)]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost, capital=1000,
+                          risk_limits=BacktestRiskLimits(max_orders_session=1), mode="setup_study")
+    assert len(result["trades"]) == 3
+    assert result["trades"].VolumeLots.tolist() == [.01, .01, .01]
+    assert result["execution_audit"]["filled_over_reference_risk_budget"] == 3
+    assert result["metrics"]["initial_capital"] is None and result["metrics"]["total_net_return"] is None
+    assert result["metrics"]["net_pnl"] == pytest.approx(-30)
+    assert result["equity"].CumulativePnL.iloc[-1] == pytest.approx(-30)
+    assert not result["account_limits_applied"]
+
+
+def test_end_liquidation_uses_last_close_and_never_fills_a_last_candle_signal(broker):
+    index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.}, index=index)
+    frame.loc[index[-1], ["high", "close"]] = [2006., 2005.]
+    signals = [Signal(symbol="XAUUSD", strategy="test", config_hash="test", direction=Direction.LONG,
+                      timestamp=stamp.to_pydatetime(), entry=2000, stop_loss=1990, take_profit=2020,
+                      rationale="end boundary fixture", regime="test", indicators={})
+               for stamp in (index[2], index[-1] + pd.Timedelta(minutes=15))]
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    result = run_backtest({"M15": frame}, signals, broker.spec("XAUUSD"), cost,
+                          risk_limits=BacktestRiskLimits(max_positions=2))
+    assert len(result["trades"]) == 1
+    assert result["trades"].ExitPrice.iloc[0] == 2005
+    assert result["trades"].ExitTime.iloc[0] == index[-1] + pd.Timedelta(minutes=15)
+    assert result["risk_blocks"] == {"unfilled_at_end": 1}
+    assert result["metrics"]["net_pnl"] == result["metrics"]["final_equity"] - 10000
+
+
+def test_backtest_rejects_an_empty_or_reversed_evaluation_window(broker):
+    index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"open": 2000., "high": 2001., "low": 1999., "close": 2000.,
+                          "tick_volume": 1}, index=index)
+    cost = CostProfile(commission_per_lot=0, spread_price=0, slippage_price=0,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    signal = []
+
+    with pytest.raises(ValueError, match="after start"):
+        run_backtest({"M15": frame}, signal, broker.spec("XAUUSD"), cost,
+                     start=index[4], end=index[4])
+    with pytest.raises(ValueError, match="timezone aware"):
+        run_backtest({"M15": frame}, signal, broker.spec("XAUUSD"), cost,
+                     start=pd.Timestamp("2024-01-01"))

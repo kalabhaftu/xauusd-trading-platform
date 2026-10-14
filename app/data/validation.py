@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 TIMEFRAMES = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440}
+BACKTEST_TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1")
 
 
 def validate(frame: pd.DataFrame, timeframe: str) -> dict:
@@ -21,9 +22,10 @@ def validate(frame: pd.DataFrame, timeframe: str) -> dict:
     if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
         raise ValueError("Duplicate or unordered candle timestamps")
     expected = pd.Timedelta(minutes=TIMEFRAMES[timeframe])
-    gaps = [{"after": frame.index[i - 1].isoformat(), "before": frame.index[i].isoformat(),
-             "classification": "unresolved"} for i in range(1, len(frame))
-            if frame.index[i] - frame.index[i - 1] > expected]
+    gap_indices = np.flatnonzero(np.diff(frame.index.as_unit("ns").to_numpy(dtype="int64")) > expected.value) + 1
+    stamps = tuple(frame.index) if len(gap_indices) else ()
+    gaps = [{"after": stamps[i - 1].isoformat(), "before": stamps[i].isoformat(),
+             "classification": "unresolved"} for i in gap_indices]
     return {"valid": True, "rows": len(frame), "start": frame.index[0].isoformat(),
             "end": frame.index[-1].isoformat(), "gaps": gaps, "complete": not gaps}
 

@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import math
 import os
 import sys
@@ -37,23 +38,25 @@ def configured(store=None):
     return settings
 
 
-def research_inputs(settings, store, args):
+def research_inputs(settings, store, args, timeframes=None):
     from app.backtesting.engine import CostProfile
-    from app.data.downloader import research_frames
     source = args.source or settings.account_server or store.get("research_source")
     symbol = args.symbol or settings.symbol or store.get("active_symbol")
     if not source or not symbol:
         raise ValueError("Specify --source and --symbol or configure the verified broker")
     from app.data.validation import TIMEFRAMES
-    frames = research_frames(store, source, symbol, args.timeframe)
-    if any(frame.empty for frame in frames.values()):
-        raise ValueError("Download the selected entry timeframe before research")
-    end = pd_timestamp(args.end) if args.end else frames[args.timeframe].index[-1] \
-        + timedelta(minutes=TIMEFRAMES[args.timeframe])
+    selected = timeframes or [args.timeframe]
+    frames = {tf: store.load_candles(source, symbol, tf) for tf in selected}
+    available = {tf: frame for tf, frame in frames.items() if not frame.empty}
+    if not available:
+        raise ValueError("Download at least one requested entry timeframe before research")
+    end = pd_timestamp(args.end) if args.end else max(
+        frame.index[-1] + timedelta(minutes=TIMEFRAMES[tf]) for tf, frame in available.items())
     start = pd_timestamp(args.start) if args.start else end - timedelta(days=365 * 3)
     # Keep prior completed bars so swing and rolling-zone state is ready at evaluation start.
     warmup_start = start - timedelta(days=90)
-    frames = {tf: f.loc[(f.index >= warmup_start) & (f.index < end)] for tf, f in frames.items()}
+    frames = {tf: f.loc[(f.index >= warmup_start) & (f.index < end)] if not f.empty else f
+              for tf, f in frames.items()}
     spec_data = store.get(f"spec:{source}:{symbol}")
     if not spec_data:
         raise ValueError("No broker specification snapshot; download-data/doctor must retrieve it")
@@ -269,7 +272,7 @@ def parser():
     download.add_argument("--refresh", action="store_true", help="Retry cached chunks with broker history gaps")
     for name in ("backtest", "compare-strategies", "validate-strategy"):
         research = sub.add_parser(name)
-        research.add_argument("--strategy", default="ict_sweep_mss_fvg")
+        research.add_argument("--strategy", default="all" if name == "backtest" else "ict_sweep_mss_fvg")
         research.add_argument("--source")
         research.add_argument("--symbol")
         research.add_argument("--start")
@@ -285,8 +288,19 @@ def parser():
         research.add_argument("--parameters-json", default="{}")
         research.add_argument("--margin", type=float, default=.01)
         research.add_argument("--policy", default="configs/research.json")
-        research.add_argument("--timeframe", choices=["M1", "M5", "M15", "M30", "H1", "H4", "D1"],
-                              default="M1")
+        if name == "backtest":
+            from app.data.validation import BACKTEST_TIMEFRAMES
+            intervals = research.add_mutually_exclusive_group()
+            intervals.add_argument("--timeframe", choices=BACKTEST_TIMEFRAMES,
+                                   help="Explicitly restrict this exploratory run to one interval")
+            intervals.add_argument("--timeframes", nargs="+", choices=BACKTEST_TIMEFRAMES,
+                                   default=list(BACKTEST_TIMEFRAMES))
+            research.add_argument("--account-only", action="store_true", help="Omit the independent setup study")
+            research.add_argument("--investigate-rules", action="store_true",
+                                  help="Compare bounded rule variants as setup diagnostics; does not auto-tune or approve")
+        else:
+            research.add_argument("--timeframe", choices=["M1", "M5", "M15", "M30", "H1", "H4", "D1"],
+                                  default="M1")
         if name == "validate-strategy":
             research.add_argument("--consume-holdout", action="store_true")
     for name, flag in (("arm-demo", "--confirm-first-order"),
@@ -367,10 +381,10 @@ def main(argv=None):
                        "confirmed_at": utcnow().isoformat()})
             output = {"coverage_confirmed": args.dataset_hash}
         else:
-            frames, spec, cost, evaluation_start, evaluation_end = research_inputs(settings, store, args)
+            timeframes = ([args.timeframe] if args.timeframe else args.timeframes) if args.command == "backtest" else None
+            frames, spec, cost, evaluation_start, evaluation_end = research_inputs(settings, store, args, timeframes)
             from app.backtesting.engine import BacktestRiskLimits
-            from app.backtesting.reports import export_report
-            from app.strategies.registry import REGISTRY, build
+            from app.strategies.registry import REGISTRY
             parameters_override = json.loads(args.parameters_json)
             risk_fraction = args.risk_fraction if args.risk_fraction is not None else settings.risk_per_trade
             configured_risk = {
@@ -378,41 +392,25 @@ def main(argv=None):
                 "weekly_loss_limit": settings.weekly_loss_limit,
                 "drawdown_limit": settings.drawdown_limit,
                 "consecutive_loss_limit": settings.consecutive_loss_limit,
-                "max_orders_session": settings.max_orders_session,
+                "consecutive_loss_policy": "cooldown" if args.command == "backtest" else "halt",
+                "loss_cooldown_minutes": settings.loss_cooldown_minutes,
+                # Historical research defaults to at most 10 filled trades per UTC day.
+                # The live/demo setting remains independently controlled in Settings.
+                "max_orders_session": 10,
                 "max_positions": settings.max_positions,
                 "portfolio_risk_limit": settings.portfolio_risk_limit,
                 **json.loads(args.risk_limits_json),
             }
             risk_limits = BacktestRiskLimits(**configured_risk)
             if args.command == "backtest":
-                from app.backtesting.engine import run_backtest
-                parameters = {**store.get(f"strategy_parameters:{args.strategy}", {}),
-                              **parameters_override,
-                              "entry_timeframe": args.timeframe}
-                strategy = build(args.strategy, parameters)
-                result = run_backtest(frames, strategy.signals(frames, spec.symbol), spec, cost,
-                                      args.capital, risk_fraction,
-                                      start=evaluation_start, end=evaluation_end,
-                                      timeframe=args.timeframe, risk_limits=risk_limits,
-                                      configuration={"strategy": strategy.name,
-                                          "strategy_parameters": strategy.parameters.model_dump(),
-                                          "strategy_config_hash": strategy.config_hash,
-                                          "risk_fraction": risk_fraction,
-                                          "risk_limits": risk_limits.model_dump(),
-                                          "cost": cost.model_dump(), "capital": args.capital,
-                                          "entry_timeframe": args.timeframe,
-                                          "source": cost.source, "symbol": spec.symbol,
-                                          "symbol_specification": spec.model_dump(mode="json"),
-                                          "requested_start": evaluation_start.isoformat(),
-                                          "requested_end_exclusive": evaluation_end.isoformat()})
-                folder = export_report(result, settings.report_dir, args.strategy)
-                output = {"metrics": result["metrics"], "dataset_hash": result["dataset_hash"],
-                          "report": str(folder.resolve()), "approval": "exploratory run only",
-                          "cost_review_required": not cost.costs_verified,
-                          "configuration": result["configuration"], "risk_blocks": result["risk_blocks"],
-                          "candidate_signal_count": result["candidate_signal_count"],
-                          "trade_count": len(result["trades"])}
-                store.record("backtest_results", output)
+                from app.backtesting.campaign import run_campaign
+                names = list(REGISTRY) if args.strategy == "all" else [args.strategy]
+                output = run_campaign(store, frames, names, spec, cost, settings.report_dir,
+                                      args.capital, risk_fraction, start=evaluation_start, end=evaluation_end,
+                                      timeframes=timeframes, risk_limits=risk_limits,
+                                      parameters_override=parameters_override,
+                                      include_setup_study=not args.account_only, investigate_rules=args.investigate_rules,
+                                      progress=logging.getLogger("app.backtesting.campaign").info)
             else:
                 from pathlib import Path
 

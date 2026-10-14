@@ -65,9 +65,11 @@ chart and copy its refreshed export. Stale or missing schedules block automation
 
 ## Research and authorization
 
-Research defaults to the last three years available in the local database, with M15 entries.
-Supported entry intervals are M1, M5, M15, and M30. Download an interval, then run the comparison for each
-timeframe to assess sensitivity; the current rule sets do not add a separate higher-timeframe trend filter. History
+Exploratory backtests default to both strategies over the last three years requested from the local database,
+running M1, M5, M15, M30 and H1 together. Each pair gets a $1,000 account replay at 0.25% risk and an independent
+minimum-lot setup study. The account replay defaults to ten filled trades per UTC day and a 60-minute cooldown
+after five losses. The study evaluates all executable setups with account guards disabled and over-budget fills flagged;
+its P&L is a diagnostic, not a feasible account return. The current rules do not add a separate higher-timeframe trend filter. History
 coverage depends on the account, broker, symbol, and MT5 terminal limits; use the dashboard's coverage table before
 choosing a date range. Downloaded bars remain broker candles and their gaps remain visible in Data Quality.
 Screening defaults are in `configs/research.json`; supply another validated JSON file with `--policy PATH`.
@@ -75,7 +77,7 @@ Each experiment records assumptions, specifications, dataset hashes, chronologic
 Download limitations and unresolved gaps are visible; missing prices are never manufactured.
 
 The **Backtesting Lab** keeps the current strategy rules and risk/cost assumptions as editable defaults. Starting
-capital defaults to the latest verified account balance and can be edited for each simulation. A coverage table shows
+capital defaults to $1,000, independently of the connected account, and can be edited for each simulation. A coverage table shows
 the actual date range and candle count per stored interval. Adjust
 strategy-specific structural rules, entry timeframe, risk per trade, daily/weekly loss stops, drawdown, entries, spread,
 commission, slippage, swaps, simulated margin, position count, and starting capital for each experiment. Strategy
@@ -85,6 +87,11 @@ The dashboard shows a readable comparison, performance summary, and trades table
 diagnostics go to the local `logs/research-console.log`.
 
 ```powershell
+# Both strategies, all five intervals, with account replay and independent setup study.
+.\.venv\Scripts\python.exe -m app.main backtest --start 2023-10-14 --end 2026-10-14
+# Add bounded rule sensitivity checks, or explicitly select one interval for debugging.
+.\.venv\Scripts\python.exe -m app.main backtest --investigate-rules
+.\.venv\Scripts\python.exe -m app.main backtest --strategy ict_sweep_mss_fvg --timeframe M5
 # Development comparison leaves the final holdout untouched.
 .\.venv\Scripts\python.exe -m app.main compare-strategies --start 2023-10-11 --end 2026-10-12
 # Final evaluation is an explicit, one-time holdout claim after development selection.
@@ -92,7 +99,7 @@ diagnostics go to the local `logs/research-console.log`.
 ```
 
 Use the **same fixed date range and timeframe** for development and final evaluation. Run `compare-strategies`
-separately for M1, M5, M15, and M30 when those data are available. The development comparison leaves the final 20%
+separately for M1, M5, M15, M30 and H1 when those data are available. The development comparison leaves the final 20%
 untouched. `validate-strategy --consume-holdout` is the explicit one-time evaluation after selecting parameters.
 The exploratory full-range `backtest` can be repeated to compare user-selected settings, but its full-sample results
 are not approval evidence. Only the explicit validation workflow claims the untouched holdout once.

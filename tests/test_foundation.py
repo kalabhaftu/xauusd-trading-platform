@@ -39,13 +39,17 @@ def test_settings_default_auto_mode_stays_disarmed_and_live_is_configurable():
         Settings(_env_file=None, risk_per_trade=1.01, hard_risk_max=1.0)
 
 
-def test_research_defaults_are_one_minute_with_independent_capital():
+def test_backtest_defaults_cover_both_strategies_and_every_interval_through_h1():
     args = parser().parse_args(["backtest"])
-    assert args.timeframe == "M1"
+    assert args.timeframe is None
+    assert args.timeframes == ["M1", "M5", "M15", "M30", "H1"]
+    assert args.strategy == "all"
     assert args.capital == 1000
     assert Parameters().entry_timeframe == "M1"
     assert BacktestRiskLimits().daily_loss_limit == .05
     assert BacktestRiskLimits().consecutive_loss_limit == 5
+    assert BacktestRiskLimits().max_orders_session == 10
+    assert Settings(_env_file=None).max_orders_session == 3  # Separate live/demo control.
 
 
 def test_legacy_half_percent_caps_are_migrated_to_user_configurable(store, monkeypatch):

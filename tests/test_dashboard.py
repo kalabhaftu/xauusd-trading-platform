@@ -67,6 +67,31 @@ def test_backtest_starting_balance_is_independent_of_connected_account(tmp_path,
     capital = next(item for item in application.number_input
                    if item.label == "Starting balance for this backtest (USD)")
     assert capital.value == 1000.0
+    intervals = next(item for item in application.multiselect if item.label == "Backtest intervals")
+    assert intervals.value == ["M1", "M5", "M15", "M30", "H1"]
+    strategies = next(item for item in application.selectbox if item.label == "Strategy to evaluate")
+    assert strategies.value == "all"
+    assert next(item for item in application.checkbox if item.label == "Include independent setup study").value
+
+
+def test_dashboard_renders_batch_comparison_and_setup_pnl_chart(store, broker, synthetic_frames, tmp_path, monkeypatch):
+    from app.backtesting.campaign import run_campaign
+    from app.backtesting.engine import CostProfile
+
+    report_dir = tmp_path / "batch_reports"
+    cost = CostProfile(commission_per_lot=0, spread_price=.5, slippage_price=.2,
+                       swap_long_per_lot_day=0, swap_short_per_lot_day=0)
+    run_campaign(store, {"H1": synthetic_frames["H1"].iloc[:100]}, ["support_resistance_bounce"],
+                 broker.spec("XAUUSD"), cost, report_dir, timeframes=["H1"])
+    monkeypatch.setenv("XAU_DATABASE_URL", str(store.engine.url))
+    monkeypatch.setenv("XAU_REPORT_DIR", str(report_dir))
+    application = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app/dashboard/home.py"))
+    application.run(timeout=30)
+    application.sidebar.selectbox[0].set_value("Backtesting Lab").run(timeout=30)
+    assert not application.exception
+    assert any("study_trades" in frame.value.columns for frame in application.dataframe)
+    next(item for item in application.checkbox if item.label == "Show setup P&L and drawdown").set_value(True).run(timeout=30)
+    assert not application.exception and len(application.get("plotly_chart")) == 1
 
 
 def test_dashboard_labels_live_as_real_money_and_defaults_auto(tmp_path, monkeypatch):

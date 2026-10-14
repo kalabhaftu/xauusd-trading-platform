@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 from app.config.settings import Settings
 from app.config.user_setup import save_telegram_credentials, save_user_setup
+from app.data.validation import BACKTEST_TIMEFRAMES
 from app.database.models import candles as candle_table
 from app.database.storage import Store
 from app.domain import utcnow
@@ -172,8 +173,8 @@ def display_records(table, limit=1000):
 
 PARAMETER_GROUPS = {
     "Entry and trade management": ("entry_timeframe", "max_holding_hours"),
-    "ICT setup structure": ("swing_bars", "max_level_age_bars", "setup_expiry_bars"),
-    "Support and resistance": ("level_window_minutes", "minimum_prior_bounces"),
+    "ICT setup structure": ("swing_bars", "max_level_age_bars", "setup_expiry_bars", "fvg_confirmation_bars"),
+    "Support and resistance": ("level_window_minutes", "minimum_window_bars", "minimum_prior_bounces"),
     "Risk/reward filter": ("minimum_reward_risk",),
 }
 PARAMETER_HELP = {
@@ -182,8 +183,10 @@ PARAMETER_HELP = {
     "swing_bars": "Bars on each side required to confirm a swing. It becomes usable only after the right-side bars close.",
     "max_level_age_bars": "Ignore an ICT swing after this many completed bars. This is an implementation setting, not a universal ICT rule.",
     "setup_expiry_bars": "Cancel an ICT setup if its FVG return does not happen within this many bars.",
+    "fvg_confirmation_bars": "Allow the three-candle gap to finish this many candles after the structure break. Zero requires it on the break candle.",
     "level_window_minutes": "Rolling time window used to find support/resistance extrema. The study examined 60 and 240 minutes; the default is 240.",
-    "minimum_prior_bounces": "Earlier bounces required at a nearby level before another bounce can create a signal.",
+    "minimum_window_bars": "Minimum completed candles in the rolling sample. This extends the time window on higher intervals; H1 defaults to at least 16 hours.",
+    "minimum_prior_bounces": "Completed bounces in the trailing sample on this exact support/resistance zone required before an entry.",
     "minimum_reward_risk": "Reject a setup when the structural target is closer than this multiple of its stop distance. This is configurable, not a proven optimum.",
 }
 
@@ -252,9 +255,12 @@ def strategy_parameter_inputs(name, existing, key_prefix, include_timeframes=Tru
 
 def display_metrics(metrics):
     columns = st.columns(4)
-    columns[0].metric("Net return", f"{metrics.get('total_net_return', 0):.2%}")
+    columns[0].metric("Net return", f"{metrics['total_net_return']:.2%}" if metrics.get("total_net_return") is not None else "—")
     columns[1].metric("Win rate", f"{metrics['win_rate']:.1%}" if metrics.get("win_rate") is not None else "—")
-    columns[2].metric("Net P&L", f"{metrics.get('final_equity', 0) - metrics.get('initial_capital', 0):,.2f} USD")
+    pnl = metrics.get("net_pnl")
+    if pnl is None:
+        pnl = (metrics.get("final_equity") or 0) - (metrics.get("initial_capital") or 0)
+    columns[2].metric("Net P&L", f"{pnl:,.2f} USD")
     columns[3].metric("Trades", f"{metrics.get('total_trades', 0):,}")
     details = pd.DataFrame([{"Metric": label, "Result": str(value) if value is not None else "—"} for label, value in (
         ("Profit factor", metrics.get("profit_factor")),
@@ -909,28 +915,38 @@ elif page == "Strategies":
         display_records("backtest_results", 30)
 elif page == "Backtesting Lab":
     st.caption("Historical candles only • simulated fills never reach MT5. Every run keeps its own rules, costs, risk settings, and trade ledger.")
-    operation = st.selectbox("Research task", ["compare-strategies", "validate-strategy", "backtest"],
+    operation = st.selectbox("Research task", ["backtest", "compare-strategies", "validate-strategy"],
                              format_func=lambda value: {"compare-strategies": "Compare all strategies",
                                  "validate-strategy": "Evaluate selected strategy",
-                                 "backtest": "Exploratory full-range simulation"}[value],
+                                 "backtest": "Backtest both strategies across all intervals"}[value],
                              help="Comparison and validation use chronological partitions. Full-range simulation is exploratory and cannot approve automation.")
-    research_name = st.selectbox("Strategy to evaluate", list(REGISTRY)) \
-        if operation != "compare-strategies" else None
-    parameter_strategy = research_name
+    research_name = st.selectbox("Strategy to evaluate", ["all", *REGISTRY],
+                                format_func=lambda name: "Both strategies" if name == "all" else name) \
+        if operation == "backtest" else st.selectbox("Strategy to evaluate", list(REGISTRY)) \
+        if operation == "validate-strategy" else None
+    parameter_strategy = research_name if research_name in REGISTRY else None
     stored_timeframes = available_timeframes()
     entries = [tf for tf in ("M1", "M5", "M15", "M30", "H1", "H4", "D1") if tf in stored_timeframes]
     if not entries:
         st.warning("Download an entry timeframe (M1 through D1) before running historical analysis.")
         entries = ["M1"]
-    timeframe = st.selectbox("Entry timeframe", entries, index=entries.index("M1") if "M1" in entries else 0,
-                             help="Signals are generated from each completed candle at this interval.")
+    backtest_timeframes = st.multiselect("Backtest intervals", list(BACKTEST_TIMEFRAMES),
+        default=list(BACKTEST_TIMEFRAMES), help="Run each selected interval independently. The default includes every interval from M1 to H1.") \
+        if operation == "backtest" else []
+    timeframe = (backtest_timeframes[0] if backtest_timeframes else "M1") if operation == "backtest" else \
+        st.selectbox("Entry timeframe", entries, index=entries.index("M1") if "M1" in entries else 0,
+                     help="Signals are generated from each completed candle at this interval.")
     first, second = st.columns(2)
     start = first.date_input("Start", value=(utcnow() - pd.Timedelta(days=365 * 3)).date(),
                              help="Beginning of the scored interval. Earlier stored candles may be used only for indicator warm-up.")
     end = second.date_input("End (exclusive)", value=utcnow().date(),
                             help="The end date is excluded from the backtest interval.")
     selected_history = store.load_candles(source, symbol, timeframe) if source and symbol else pd.DataFrame()
-    history_ready = not selected_history.empty
+    history_ready = bool(backtest_timeframes) and any(tf in stored_timeframes for tf in backtest_timeframes) \
+        if operation == "backtest" else not selected_history.empty
+    missing_intervals = [tf for tf in backtest_timeframes if tf not in stored_timeframes]
+    if missing_intervals:
+        st.warning("No stored history for " + ", ".join(missing_intervals) + "; these intervals will be recorded as unavailable.")
     if not selected_history.empty:
         coverage_start, coverage_end = selected_history.index[0], selected_history.index[-1]
         st.caption(f"Stored {timeframe} coverage: {coverage_start:%Y-%m-%d} through {coverage_end:%Y-%m-%d} "
@@ -954,10 +970,10 @@ elif page == "Backtesting Lab":
                     "First saved candle (UTC)": first_bar.strftime("%Y-%m-%d %H:%M"),
                     "Last saved candle (UTC)": last_bar.strftime("%Y-%m-%d %H:%M"),
                     "Years available": round(years, 2)})
-            with st.expander("All saved timeframe coverage", expanded=False):
+            with st.expander("All saved timeframe coverage", expanded=operation == "backtest"):
                 st.dataframe(pd.DataFrame(coverage_rows).sort_values("Timeframe"),
                              width="stretch", hide_index=True)
-                st.caption("Each backtest uses the timeframe selected above. Lower-timeframe history may be shorter than three years; no candles are invented to fill gaps.")
+                st.caption("Every selected backtest interval runs independently. M1 and M5 may have shorter history; each report gives its actual coverage.")
     default_capital = 1000.0
     sizing = st.columns(2)
     capital = sizing[0].number_input("Starting balance for this backtest (USD)", min_value=1.0,
@@ -990,7 +1006,7 @@ elif page == "Backtesting Lab":
             include_timeframes=False)
     else:
         parameters = {}
-        st.info("Comparison uses each strategy's own saved/default rules and the entry interval selected above.")
+        st.info("Both strategies use their saved/default rules independently at each selected interval.")
     st.caption("Stops and targets follow each strategy's structure rules; the old generic ATR stop/target grid is no longer used.")
     with st.expander("Risk, costs, and execution assumptions", expanded=False):
         if settings.cost_mode == "AUTO":
@@ -1020,14 +1036,27 @@ elif page == "Backtesting Lab":
         consecutive = columns[0].number_input("Consecutive loss stop", min_value=1,
             value=settings.consecutive_loss_limit, step=1,
             help="Block further entries after this many consecutive net losing trades.")
-        session_entries = columns[1].number_input("Entries per session", min_value=1,
-            value=settings.max_orders_session, step=1,
-            help="Maximum requested entries per named strategy session, or UTC day for continuous strategies.")
+        streak_policy = columns[0].selectbox("After the loss streak", ["Stop for the rest of this run", "Resume after cooldown"],
+            index=1 if operation == "backtest" else 0,
+            help="Exploratory backtests default to a research cooldown. Validation can replay a persistent safety halt. Cooldown assumes an operator "
+                 "resets that halt after the delay; it does not enable automatic reset in demo/live trading.")
+        research_cooldown = columns[0].number_input("Research cooldown (minutes)", min_value=1,
+            value=settings.loss_cooldown_minutes, step=5, disabled=streak_policy == "Stop for the rest of this run",
+            help="How long the research replay waits before resetting its loss streak. Other risk limits remain active.")
+        session_entries = columns[1].number_input("Maximum entries per UTC day", min_value=1,
+            value=10, step=1,
+            help="Maximum filled trades per UTC day in each account replay. Rejected orders do not consume this quota.")
         max_positions = columns[0].number_input("Simultaneous positions", min_value=1,
             value=settings.max_positions, step=1,
             help="Maximum number of open simulated positions. The live/demo default remains one position.")
     consume_holdout = False
+    include_setup_study = True
+    investigate_rules = False
     if operation == "backtest":
+        include_setup_study = st.checkbox("Include independent setup study", value=True,
+            help="Measure each setup at the broker minimum lot with account guards disabled and overlapping positions. Over-budget trades are flagged; its P&L is not an achievable account return.")
+        investigate_rules = st.checkbox("Compare a small set of rule variants", value=False,
+            help="Compare gap-confirmation timing and support/resistance sample length. Records early/middle/late results without automatically choosing a winner.")
         consume_holdout = st.checkbox("I understand this full-range run is exploratory, not approval evidence",
             help="This allows repeatable parameter experiments. Use Validate strategy for the one-time approval holdout.")
     if operation == "validate-strategy":
@@ -1047,6 +1076,8 @@ elif page == "Backtesting Lab":
                 }).parameters.model_dump() if parameter_strategy else {})
                 risk_limits = {"daily_loss_limit": day_loss / 100, "weekly_loss_limit": week_loss / 100,
                     "drawdown_limit": drawdown / 100, "consecutive_loss_limit": int(consecutive),
+                    "consecutive_loss_policy": "cooldown" if streak_policy == "Resume after cooldown" else "halt",
+                    "loss_cooldown_minutes": int(research_cooldown),
                     "max_orders_session": int(session_entries), "max_positions": int(max_positions),
                     "portfolio_risk_limit": portfolio_risk / 100}
                 Path("logs").mkdir(exist_ok=True)
@@ -1056,7 +1087,15 @@ elif page == "Backtesting Lab":
                     "--slippage", str(slippage), "--swap-long", str(swap_long), "--swap-short", str(swap_short),
                     "--margin", str(margin_percent / 100),
                     "--risk-fraction", str(risk_percent / 100), "--risk-limits-json", json.dumps(risk_limits),
-                    "--parameters-json", json.dumps(validated_parameters), "--timeframe", timeframe]
+                    "--parameters-json", json.dumps(validated_parameters)]
+                if operation == "backtest":
+                    command.extend(["--timeframes", *backtest_timeframes])
+                    if not include_setup_study:
+                        command.append("--account-only")
+                    if investigate_rules:
+                        command.append("--investigate-rules")
+                else:
+                    command.extend(["--timeframe", timeframe])
                 if research_name:
                     command.extend(["--strategy", research_name])
                 if operation == "validate-strategy" and consume_holdout:
@@ -1067,7 +1106,7 @@ elif page == "Backtesting Lab":
                 st.success(f"Analysis started (PID {process.pid}). Refresh later to see its saved result.")
             except Exception as exc:
                 st.error(f"Check the research settings: {exc}")
-    st.caption("Repeat the comparison with M5, M15, and M30 to compare the strategy rules across entry intervals.")
+    st.caption("The default backtest runs M1, M5, M15, M30 and H1 for both strategies in one saved comparison.")
     with st.expander("Dataset quality and gaps"):
         quality_records = store.list("data_quality", 100)
         if quality_records:
@@ -1116,6 +1155,18 @@ elif page == "Backtesting Lab":
                        "there is no strategy approval for automatic trading.")
         if payload.get("metrics"):
             display_metrics(payload["metrics"])
+        if payload.get("comparisons"):
+            st.dataframe(pd.DataFrame(payload["comparisons"]).drop(
+                columns=["account_report", "study_report"], errors="ignore"), width="stretch", hide_index=True)
+            st.caption("Account columns replay the stated balance and risk limits. Study columns evaluate independent minimum-lot setups; over-budget fills are included and flagged.")
+            st.dataframe(pd.DataFrame(payload.get("coverage", [])), width="stretch", hide_index=True)
+            summary_folder = Path(payload["summary_report"]).resolve()
+            if summary_folder.is_relative_to(settings.report_dir.resolve()):
+                for filename in ("batch.zip", "report.html", "review.md", "comparisons.csv", "sensitivity.csv"):
+                    path = summary_folder / filename
+                    if path.is_file():
+                        st.download_button(f"Download batch {filename}", path.read_bytes(), filename,
+                                           key=f"batch_{record['id']}_{filename}")
         if payload.get("candidates"):
             candidates = payload["candidates"]
             ranked_candidates = sorted(candidates,
@@ -1157,7 +1208,7 @@ elif page == "Backtesting Lab":
             "strategy settings": best_candidate.get("parameters", payload.get("parameters")),
             "cost assumptions": payload.get("cost_assumptions"), "risk limits": payload.get("risk_limits"),
             "risk per trade": payload.get("risk_fraction"), "capital": payload.get("initial_capital"),
-            "timeframes": [payload.get("entry_timeframe")],
+            "timeframes": payload.get("timeframes") or [payload.get("entry_timeframe")],
         }
         configuration_rows = flatten_values(configuration)
         if configuration_rows:
@@ -1177,13 +1228,20 @@ elif page == "Backtesting Lab":
             if candidate.get("report"):
                 reports.append((candidate.get("strategy", "Strategy"), candidate["report"],
                                 candidate.get("validation"), candidate.get("configuration", {})))
+        for run in payload.get("runs", []):
+            title = f"{run['strategy']} / {run['entry_timeframe']} / {run['mode']} / {run.get('variant', 'default')}"
+            reports.append((title, run["report"], run["metrics"], run["configuration"]))
         for title, report, metrics, report_configuration in reports:
             folder = Path(report).resolve()
             if not folder.is_relative_to(settings.report_dir.resolve()):
                 continue
             trades_path = folder / "trades.csv"
             ledger = pd.read_csv(trades_path) if trades_path.is_file() else pd.DataFrame()
-            with st.expander(f"{title} • {len(ledger):,} saved trades", expanded=not bool(payload.get("candidates"))):
+            with st.expander(f"{title} • {len(ledger):,} saved trades",
+                             expanded=not bool(payload.get("candidates") or payload.get("runs"))):
+                study_mode = report_configuration.get("mode") == "setup_study"
+                if study_mode:
+                    st.caption("Independent minimum-lot setup study. Account guards are disabled and positions can overlap; these trades do not represent a feasible account replay.")
                 if report_configuration:
                     st.dataframe(pd.DataFrame(flatten_values(report_configuration)),
                                  width="stretch", hide_index=True)
@@ -1192,25 +1250,27 @@ elif page == "Backtesting Lab":
                     st.caption("Complete simulated position details: broker-volume size, fill prices, costs, net P&L, and R multiple.")
                     st.dataframe(trades, width="stretch", hide_index=True)
                     st.download_button("Download full trade ledger", trades_path.read_bytes(),
-                                       f"{title.lower().replace(' ', '-')}-trades.csv",
+                                       f"{title.lower().replace(' ', '-').replace('/', '-')}-trades.csv",
                                        "text/csv", key=f"trades_{record['id']}_{title}")
                 else:
                     st.caption("No validation trade ledger was generated for this candidate.")
                 equity_path = folder / "equity.csv"
-                if equity_path.is_file() and metrics and st.checkbox("Show equity and drawdown",
+                if equity_path.is_file() and metrics and st.checkbox("Show setup P&L and drawdown" if study_mode else "Show equity and drawdown",
                                                                       key=f"chart_{record['id']}_{title}"):
                     equity_data = pd.read_csv(equity_path, index_col=0, parse_dates=True)
                     initial = metrics.get("initial_capital", 0)
-                    equity = equity_data.Equity
+                    equity = equity_data.CumulativePnL if study_mode else equity_data.Equity
                     figure = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                           subplot_titles=["Historical equity (USD)", "Drawdown (%)"])
-                    figure.add_trace(go.Scatter(x=equity.index, y=equity, name="Equity"), row=1, col=1)
+                                           subplot_titles=["Setup P&L (USD)", "Drawdown (USD)"] if study_mode
+                                           else ["Historical equity (USD)", "Drawdown (%)"])
+                    figure.add_trace(go.Scatter(x=equity.index, y=equity, name="Setup P&L" if study_mode else "Equity"), row=1, col=1)
                     figure.add_trace(go.Scatter(x=equity.index,
-                        y=100 * (1 - equity / equity.cummax().clip(lower=initial)),
-                        name="Drawdown %", fill="tozeroy"), row=2, col=1)
+                        y=equity.cummax().clip(lower=0) - equity if study_mode else
+                          100 * (1 - equity / equity.cummax().clip(lower=initial)),
+                        name="Drawdown USD" if study_mode else "Drawdown %", fill="tozeroy"), row=2, col=1)
                     figure.update_layout(template="plotly_dark", height=500)
                     st.plotly_chart(figure, width="stretch")
-                for filename in ("report.html", "equity.csv", "comparisons.csv", "sensitivity.csv"):
+                for filename in ("report.html", "equity.csv", "entry_decisions.csv", "comparisons.csv", "sensitivity.csv"):
                     path = folder / filename
                     if path.is_file():
                         st.download_button(f"Download {filename}", path.read_bytes(), filename,

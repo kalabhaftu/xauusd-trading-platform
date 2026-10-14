@@ -22,6 +22,7 @@ class IctParameters(Parameters):
     swing_bars: int = Field(default=2, ge=1, le=10)
     max_level_age_bars: int = Field(default=96, ge=2, le=2000)
     setup_expiry_bars: int = Field(default=24, ge=1, le=500)
+    fvg_confirmation_bars: int = Field(default=2, ge=0, le=5)
     minimum_reward_risk: float = Field(default=1.0, gt=0, le=10)
 
 
@@ -29,6 +30,7 @@ class SupportResistanceParameters(Parameters):
     # The cited study evaluated 60- and 240-minute windows. The default uses 240;
     # the user can test the shorter window and other values on their own feed.
     level_window_minutes: int = Field(default=240, ge=60, le=1440)
+    minimum_window_bars: int = Field(default=16, ge=3, le=240)
     minimum_prior_bounces: int = Field(default=1, ge=0, le=20)
     minimum_reward_risk: float = Field(default=1.0, gt=0, le=10)
 

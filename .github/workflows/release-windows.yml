@@ -34,6 +34,16 @@ jobs:
           .\.venv\Scripts\python.exe -m pip install --no-build-isolation --no-deps -e .
           if ($LASTEXITCODE -ne 0) { throw 'Project installation failed.' }
 
+      - name: Verify the tagged release
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe -m ruff check app tests migrations
+          if ($LASTEXITCODE -ne 0) { throw 'Release lint checks failed.' }
+          .\.venv\Scripts\python.exe -m mypy app
+          if ($LASTEXITCODE -ne 0) { throw 'Release type checks failed.' }
+          .\.venv\Scripts\python.exe -m pytest
+          if ($LASTEXITCODE -ne 0) { throw 'Release tests failed.' }
+
       - name: Build and self-test the standalone launcher
         shell: pwsh
         run: .\scripts\build-launcher.ps1

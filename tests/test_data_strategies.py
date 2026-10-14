@@ -53,9 +53,18 @@ def test_incremental_storage_and_gap_detection(store, synthetic_frames):
     assert validate(frame.drop(frame.index[4]), "M15")["gaps"][0]["classification"] == "unresolved"
 
 
+@pytest.mark.parametrize("unit", ["ns", "us"])
+def test_gap_validation_is_independent_of_datetime_storage_unit(unit, synthetic_frames):
+    frame = synthetic_frames["M15"].iloc[:10].drop(synthetic_frames["M15"].index[4]).copy()
+    frame.index = frame.index.as_unit(unit)
+    gap = validate(frame, "M15")["gaps"]
+    assert len(gap) == 1
+    assert pd.Timestamp(gap[0]["before"]) - pd.Timestamp(gap[0]["after"]) == pd.Timedelta(minutes=30)
+
+
 @pytest.mark.parametrize("name", list(REGISTRY))
 def test_future_candles_do_not_change_prior_signals(name, synthetic_frames):
-    strategy = build(name)
+    strategy = build(name, {"entry_timeframe": "M15"})
     cutoff = synthetic_frames["M15"].index[3000]
     prefix = {tf: f.loc[f.index + pd.Timedelta(minutes=15 if tf == "M15" else 60) <= cutoff]
               for tf, f in synthetic_frames.items()}

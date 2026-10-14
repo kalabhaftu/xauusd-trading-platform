@@ -38,8 +38,12 @@ def metrics(trades, equity, capital, cost, multiplier):
         monthly.iloc[0] = monthly_equity.iloc[0] / capital - 1
     exposure = np.zeros(len(series), dtype=bool)
     if n:
-        for trade in trades.itertuples():
-            exposure |= (series.index >= trade.EntryTime) & (series.index <= trade.ExitTime)
+        changes = np.zeros(len(series) + 1, dtype=int)
+        starts = series.index.searchsorted(trades.EntryTime, side="left")
+        ends = series.index.searchsorted(trades.ExitTime, side="right")
+        np.add.at(changes, starts, 1)
+        np.add.at(changes, ends, -1)
+        exposure = changes[:-1].cumsum() > 0
     costs = float(trades.Commission.sum()) if n and "Commission" in trades else 0
     if n:
         costs += float((trades.VolumeLots * (cost.spread_price + 2 * cost.slippage_price)

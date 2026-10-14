@@ -18,14 +18,23 @@ Each Backtesting.py integer unit is a broker volume step; economic OHLC prices a
 volume step. This preserves CFD P&L and permits fractional lots without interpreting lot counts as ounces. Quantities
 are rounded down and recalculated at actual modeled entry prices. Entry signals execute at the next bar open.
 
-Historical replay applies the same default portfolio guardrails used by demo settings: 5% daily loss from UTC day
-equity, 3% weekly loss from Monday 00:00 UTC, 10% peak drawdown, five consecutive net losses, and three requested
-entries per named session (or UTC day for continuous strategies). One simultaneous position is the default; historical
-simulations allow up to ten when the combined open-risk cap is respected. The demo default remains one. The lab
+Exploratory `backtest` defaults to both strategies on M1/M5/M15/M30/H1 in one campaign. Each interval records its
+own actual data coverage and missing intervals are explicit. The starting balance is $1,000 independently of MT5.
+Account replay applies 5% daily loss from UTC day equity, 3% weekly loss from Monday 00:00 UTC, 10% peak drawdown,
+five consecutive net losses followed by a configurable 60-minute research cooldown, and ten filled trades per UTC day.
+Rejected orders do not consume the daily quota. One simultaneous position is the default; additional positions
+must respect combined open risk. Validation retains the persistent halt option. The lab
 allows these thresholds, per-trade risk, starting capital, cost assumptions, strategy parameters, and timeframes to
 be changed per research run. Each run persists the exact settings, metrics, trades and equity curve in its report
 folder; trade ledgers include simulated lot size, prices, commission, financing, net P&L, and R. Full-sample
 exploratory runs can be repeated for comparison but are not approval evidence.
+
+Each campaign also evaluates independent setups at the broker minimum lot. This diagnostic bypasses the risk
+budget, daily quota, cumulative loss and position guards, and allows overlapping trades. It flags setups whose
+minimum lot exceeds the requested balance/risk budget. It reports net P&L, PF and all-in R without a feasible
+account balance, percentage return, or percentage drawdown. The three descriptive time segments are already
+inspected research; they are not described as an untouched holdout. `--investigate-rules` adds bounded rule
+sensitivity checks without automatically selecting parameters. `--account-only` omits this study.
 
 The strategies define stops and targets from sweep extremes, opposing swing liquidity, or the other support/resistance
 zone. Generic stop/target grid search is disabled because it would replace those structural brackets and misrepresent
@@ -35,7 +44,10 @@ Spread is a configured fixed absolute price assumption. Long entries pay spread;
 bid-equivalent levels, and short exits pay spread. Adverse slippage applies to entries and exits. Commission is charged
 per lot on both sides. Stops precede targets in ambiguous candles; adverse stop gaps fill at the worse opening price.
 The extension relies on private Backtesting.py broker methods, hence version 0.6.5 is pinned and regression-tested.
-The R denominator is the proposed stop distance times filled contract quantity; its numerator includes modeled costs.
+Sizing uses equity and margin valued at the fill's opening quote. Intrabar closes and the future candle close cannot
+fund a new entry. Portfolio sizing rounds down to the remaining risk budget. At the dataset boundary, pending entries
+are rejected and open positions liquidate at the last observed close; the last candle is not replayed to fill a new order.
+The R denominator is the all-in estimated stop loss at the actual fill, including costs; its numerator is net modeled P&L.
 
 Funding is a documented **calendar-day approximation** using signed per-lot daily inputs. It is deducted from equity
 and added to trade P&L. Broker rollover times, triple swaps, historical financing-rate changes, dynamic leverage,

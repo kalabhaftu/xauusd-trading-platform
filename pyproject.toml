@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xauusd-trading-platform"
-version = "0.1.0"
+version = "0.2.0"
 description = "Auditable XAU/USD research and guarded MT5 demo/live automation"
 requires-python = ">=3.12"
 dependencies = [

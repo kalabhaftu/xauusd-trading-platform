@@ -3,6 +3,7 @@ from typing import cast
 
 import pandas as pd
 
+from app.data.validation import TIMEFRAMES
 from app.domain import Direction, Signal
 from app.strategies.base import IctParameters, Strategy
 
@@ -21,6 +22,7 @@ class _Setup:
     mss_level: float
     phase: str = "await_mss"
     mss_index: int = -1
+    fvg_index: int = -1
     fvg_low: float = 0.0
     fvg_high: float = 0.0
 
@@ -31,12 +33,12 @@ class IctSweepMssFvg(Strategy):
     name = "ict_sweep_mss_fvg"
     description = (
         "ICT concept sequence: sweep a confirmed swing liquidity level and reclaim it; "
-        "close through the latest opposing confirmed swing while forming a three-candle FVG; "
+        "close through the latest opposing confirmed swing, then confirm a three-candle FVG in that displacement; "
         "then wait for a completed-candle return into that FVG. Stop is beyond the sweep wick; "
         "target is the next unswept opposing swing liquidity."
     )
     parameters_model = IctParameters
-    rules_version = 2
+    rules_version = 5
 
     def _swings(self, frame: pd.DataFrame) -> tuple[list[tuple[int, _Swing]], list[tuple[int, _Swing]]]:
         right = cast(IctParameters, self.parameters).swing_bars
@@ -66,6 +68,8 @@ class IctSweepMssFvg(Strategy):
         high = frame.high.to_numpy(dtype=float)
         low = frame.low.to_numpy(dtype=float)
         close = frame.close.to_numpy(dtype=float)
+        timestamps = cast(pd.DatetimeIndex, frame.index).as_unit("ns").to_numpy(dtype="int64")
+        candle_ns = pd.Timedelta(minutes=TIMEFRAMES[timeframe]).value
         high_events, low_events = self._swings(frame)
         active_highs: list[_Swing] = []
         active_lows: list[_Swing] = []
@@ -73,6 +77,8 @@ class IctSweepMssFvg(Strategy):
         setup: _Setup | None = None
         output: list[Signal] = []
         for i in range(len(frame)):
+            if i and timestamps[i] - timestamps[i - 1] > candle_ns:
+                setup = None  # An unobserved price path cannot complete a pending intraday sequence.
             # A pivot becomes usable only after its right-side confirmation candle
             # has itself closed. It is therefore first available on the next bar.
             while high_event_index < len(high_events) and high_events[high_event_index][0] < i:
@@ -86,6 +92,11 @@ class IctSweepMssFvg(Strategy):
                             if i - pivot.confirmed_at <= p.max_level_age_bars]
             active_lows = [pivot for pivot in active_lows
                            if i - pivot.confirmed_at <= p.max_level_age_bars]
+            # Keep the levels that were active immediately before this candle.
+            # The current candle can sweep a swing and remove it from the active
+            # set, but that same close may be the market structure shift through it.
+            mss_highs = active_highs.copy()
+            mss_lows = active_lows.copy()
 
             # Record liquidity taken on this candle, but only treat a wick-through
             # followed by a close back across the level as a sweep-and-reclaim.
@@ -109,19 +120,37 @@ class IctSweepMssFvg(Strategy):
             if setup is not None and not both_sides:
                 if setup.phase == "await_mss" and i > setup.sweep_index:
                     previous_close = close[i - 1]
-                    bullish_fvg = i >= 2 and low[i] > high[i - 2]
-                    bearish_fvg = i >= 2 and high[i] < low[i - 2]
-                    if (setup.direction == Direction.LONG and previous_close <= setup.mss_level < close[i]
-                            and bullish_fvg):
-                        setup.phase = "await_fvg_return"
+                    mss_level = None
+                    if setup.direction == Direction.LONG:
+                        opposing = [pivot for pivot in mss_highs if previous_close <= pivot.price]
+                        if opposing:
+                            mss_level = max(opposing, key=lambda pivot: pivot.confirmed_at).price
+                    else:
+                        opposing = [pivot for pivot in mss_lows if previous_close >= pivot.price]
+                        if opposing:
+                            mss_level = max(opposing, key=lambda pivot: pivot.confirmed_at).price
+                    if mss_level is not None:
+                        setup.mss_level = mss_level
+                    if (setup.direction == Direction.LONG
+                            and mss_level is not None and previous_close <= mss_level < close[i]):
+                        setup.phase = "await_fvg"
                         setup.mss_index = i
+                    elif (setup.direction == Direction.SHORT
+                          and mss_level is not None and previous_close >= mss_level > close[i]):
+                        setup.phase = "await_fvg"
+                        setup.mss_index = i
+                if setup.phase == "await_fvg":
+                    if i - setup.mss_index > p.fvg_confirmation_bars:
+                        setup = None
+                    elif i >= 2 and setup.direction == Direction.LONG and low[i] > high[i - 2]:
+                        setup.phase = "await_fvg_return"
+                        setup.fvg_index = i
                         setup.fvg_low, setup.fvg_high = float(high[i - 2]), float(low[i])
-                    elif (setup.direction == Direction.SHORT and previous_close >= setup.mss_level > close[i]
-                          and bearish_fvg):
+                    elif i >= 2 and setup.direction == Direction.SHORT and high[i] < low[i - 2]:
                         setup.phase = "await_fvg_return"
-                        setup.mss_index = i
+                        setup.fvg_index = i
                         setup.fvg_low, setup.fvg_high = float(high[i]), float(low[i - 2])
-                elif setup.phase == "await_fvg_return" and i > setup.mss_index:
+                if setup is not None and setup.phase == "await_fvg_return" and i > setup.fvg_index:
                     close_inside_fvg = setup.fvg_low <= close[i] <= setup.fvg_high
                     revisited_fvg = (low[i] <= setup.fvg_high if setup.direction == Direction.LONG
                                      else high[i] >= setup.fvg_low)
@@ -150,6 +179,7 @@ class IctSweepMssFvg(Strategy):
                                 {"swept_level": float(setup.sweep_extreme),
                                  "mss_level": float(setup.mss_level),
                                  "fvg_low": float(setup.fvg_low), "fvg_high": float(setup.fvg_high),
+                                 "fvg_confirmation_delay": float(setup.fvg_index - setup.mss_index),
                                  "target_liquidity": float(target), "reward_risk": float(rr),
                                  "swing_bars": float(p.swing_bars)})
                             if signal is not None:
@@ -171,7 +201,7 @@ class IctSweepMssFvg(Strategy):
                 elif bearish_sweeps:
                     opposing = [pivot for pivot in active_lows if low[i] > pivot.price]
                     if opposing:
-                        mss = min(opposing, key=lambda pivot: pivot.confirmed_at)
+                        mss = max(opposing, key=lambda pivot: pivot.confirmed_at)
                         setup = _Setup(Direction.SHORT, i, float(high[i]), mss.price)
 
         return output

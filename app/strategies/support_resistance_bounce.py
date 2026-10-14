@@ -16,7 +16,6 @@ class _LevelState:
     gamma: float
     bounces: int = 0
     pending: bool = False
-    created_at: int = 0
 
 
 class SupportResistanceBounce(Strategy):
@@ -24,14 +23,14 @@ class SupportResistanceBounce(Strategy):
 
     name = "support_resistance_bounce"
     description = (
-        "Find rolling close-price minima/maxima over a configurable 60–1440 minute window. "
+        "Find rolling close-price minima/maxima over a configurable window with at least 16 candles by default. "
         "Build zones using the trailing mean absolute close change; freeze a zone while price is inside it; "
         "count a bounce only when price exits the entry side without crossing the far zone edge. "
         "By default, trade only after one earlier bounce at a nearby level. Stop is beyond the far zone edge; "
         "target is the opposing rolling zone."
     )
     parameters_model = SupportResistanceParameters
-    rules_version = 2
+    rules_version = 3
 
     def signals(self, frames: dict[str, pd.DataFrame], symbol: str) -> list[Signal]:
         timeframe = self.parameters.entry_timeframe
@@ -41,24 +40,30 @@ class SupportResistanceBounce(Strategy):
 
         p = cast(SupportResistanceParameters, self.parameters)
         minutes = TIMEFRAMES[timeframe]
-        window_bars = max(3, math.ceil(p.level_window_minutes / minutes))
+        window_bars = max(p.minimum_window_bars, math.ceil(p.level_window_minutes / minutes))
         close = frame.close.to_numpy(dtype=float)
         high = frame.high.to_numpy(dtype=float)
         low = frame.low.to_numpy(dtype=float)
+        timestamps = cast(pd.DatetimeIndex, frame.index).as_unit("ns").to_numpy(dtype="int64")
+        lookback_ns = pd.Timedelta(minutes=window_bars * minutes).value
         support: _LevelState | None = None
         resistance: _LevelState | None = None
         output: list[Signal] = []
 
-        def refresh(state: _LevelState | None, center: float, gamma: float, index: int) -> _LevelState:
-            if state is not None and state.pending and index - state.created_at < window_bars:
+        def refresh(state: _LevelState | None, center: float, gamma: float,
+                    prior: np.ndarray, direction: Direction) -> _LevelState:
+            if state is not None and state.pending:
                 return state
-            if (state is None or index - state.created_at >= window_bars
-                    or abs(center - state.center) > 2 * max(gamma, state.gamma)):
-                return _LevelState(center, gamma, created_at=index)
-            # A nearby rolling extremum is treated as the same zone. While price
-            # is inside it, the level is frozen until a bounce/penetration resolves.
-            state.center, state.gamma, state.created_at = center, gamma, index
-            return state
+            # Count completed historical bounces on this exact rolling zone.
+            # A new level can already have prior touches in the trailing sample;
+            # transferring counters between drifting nearby levels loses that information.
+            boundary = center + gamma if direction == Direction.LONG else center - gamma
+            inside = prior <= boundary if direction == Direction.LONG else prior >= boundary
+            entries = np.flatnonzero(~inside[:-1] & inside[1:])
+            exits = np.flatnonzero(inside[:-1] & ~inside[1:])
+            bounces = int(np.count_nonzero(exits > entries[0])) if len(entries) else 0
+            pending = bool(len(entries) and (not len(exits) or entries[-1] > exits[-1]))
+            return _LevelState(center, gamma, bounces=bounces, pending=pending)
 
         def maybe_signal(index: int, direction: Direction, zone_low: float, zone_high: float,
                          opposite_center: float, opposite_gamma: float,
@@ -79,9 +84,14 @@ class SupportResistanceBounce(Strategy):
                  "resistance_center": float(resistance_center),
                  "zone_low": float(zone_low), "zone_high": float(zone_high),
                  "gamma": float(gamma), "prior_bounces": float(prior_bounces),
-                 "lookback_bars": float(window_bars)})
+                 "lookback_bars": float(window_bars), "lookback_minutes": float(window_bars * minutes)})
 
         for i in range(window_bars, len(frame)):
+            # The rolling period contains complete, contiguous candles. A market
+            # closure or missing history resets pending zones and the warm-up.
+            if timestamps[i] - timestamps[i - window_bars] > lookback_ns:
+                support = resistance = None
+                continue
             # Levels and their width use only observations strictly before this
             # candle. The paper estimates width on a complete sample; this trailing
             # estimate is a deliberate no-lookahead adaptation for real-time use.
@@ -94,8 +104,8 @@ class SupportResistanceBounce(Strategy):
             resistance_center = float(prior.max())
             if not (math.isfinite(support_center) and math.isfinite(resistance_center)):
                 continue
-            support = refresh(support, support_center, gamma, i)
-            resistance = refresh(resistance, resistance_center, gamma, i)
+            support = refresh(support, support_center, gamma, prior, Direction.LONG)
+            resistance = refresh(resistance, resistance_center, gamma, prior, Direction.SHORT)
 
             support_low = support.center - support.gamma
             support_high = support.center + support.gamma
